@@ -26,11 +26,11 @@ def queue_ingress_status(
     """Queue one idempotent provider-visible status for an ingress message.
 
     ``pending`` means the bridge will retry because dispatch has not started.
-    ``unconfirmed`` means the desktop operation may have happened but exact
-    Codex acceptance could not be proved. ``submitted`` means the selected
-    Codex writer accepted a new user turn. In desktop mode, acceptance requires
-    that exact input to appear in newly appended rollout bytes. No state is
-    described as "read", because Codex exposes no human-read receipt.
+    ``unconfirmed`` means the desktop operation itself had an ambiguous result.
+    ``submitted`` means the selected Codex writer acknowledged submission; the
+    exact rollout user item may be reconciled later when a steer waits for the
+    current tool boundary. No state is described as "read", because Codex
+    exposes no human-read receipt.
     """
 
     if status not in _STATUSES:

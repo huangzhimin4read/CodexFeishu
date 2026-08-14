@@ -924,6 +924,10 @@ class BridgeService:
                     self._active_rollout_turns[row["target_thread_id"]] = (
                         existing | frozenset({result.turn_id})
                     )
+                elif result.state == "submitted_unconfirmed":
+                    self._queue_submitted_unconfirmed_ack(
+                        row["message_id"], row["target_thread_id"]
+                    )
                 elif result.state == "outcome_unknown":
                     self._queue_unconfirmed_ack(
                         row["message_id"], row["target_thread_id"]
@@ -1265,6 +1269,19 @@ class BridgeService:
             target_thread_id=target_thread_id,
             status="pending",
             text="⏳ 尚未提交 Codex：当前任务忙碌或服务暂不可用，正在排队重试。",
+            priority=210,
+        )
+
+    def _queue_submitted_unconfirmed_ack(
+        self, message_id: str, target_thread_id: str | None
+    ) -> None:
+        queue_ingress_status(
+            self.storage,
+            self.config.feishu,
+            message_id=message_id,
+            target_thread_id=target_thread_id,
+            status="submitted",
+            text="✓ 已提交 Codex。",
             priority=210,
         )
 

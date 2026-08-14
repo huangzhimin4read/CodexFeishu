@@ -23,6 +23,44 @@ class _RecordedUserMessage:
     item_id: str
 
 
+def _without_one_terminal_newline(value: str) -> str:
+    if value.endswith("\r\n"):
+        return value[:-2]
+    if value.endswith("\n"):
+        return value[:-1]
+    return value
+
+
+def desktop_submission_text_hash(value: str) -> str:
+    """Hash desktop input while tolerating Codex's one terminal newline."""
+
+    return sha256(_without_one_terminal_newline(value).encode("utf-8")).hexdigest()
+
+
+def matches_desktop_submission(
+    actual_text: str | None,
+    expected_hash: str,
+    *,
+    has_attachments: bool,
+) -> bool:
+    """Match one observed user item to a pending desktop submission."""
+
+    if actual_text is None:
+        return False
+    if desktop_submission_text_hash(actual_text) == expected_hash:
+        return True
+    if not has_attachments:
+        return False
+    marker = "\n## My request:\n"
+    if marker not in actual_text:
+        return False
+    preamble, request_text = actual_text.rsplit(marker, 1)
+    return (
+        preamble.lstrip().startswith("# Files mentioned by the user:")
+        and desktop_submission_text_hash(request_text) == expected_hash
+    )
+
+
 class DesktopCodexDispatcher:
     """Submit to the desktop UI, then prove acceptance from new rollout bytes."""
 
@@ -80,31 +118,10 @@ class DesktopCodexDispatcher:
         *,
         has_attachments: bool,
     ) -> bool:
-        if actual_text is None:
-            return False
-
-        def without_one_terminal_newline(value: str) -> str:
-            if value.endswith("\r\n"):
-                return value[:-2]
-            if value.endswith("\n"):
-                return value[:-1]
-            return value
-
-        if actual_text == expected_text or (
-            without_one_terminal_newline(actual_text)
-            == without_one_terminal_newline(expected_text)
-        ):
-            return True
-        if not has_attachments:
-            return False
-        marker = "\n## My request:\n"
-        if marker not in actual_text:
-            return False
-        preamble, request_text = actual_text.rsplit(marker, 1)
-        return (
-            preamble.lstrip().startswith("# Files mentioned by the user:")
-            and without_one_terminal_newline(request_text)
-            == without_one_terminal_newline(expected_text)
+        return matches_desktop_submission(
+            actual_text,
+            desktop_submission_text_hash(expected_text),
+            has_attachments=has_attachments,
         )
 
     def _find_new_user_turn(
@@ -205,13 +222,17 @@ class DesktopCodexDispatcher:
         now = utc_now()
         with self.storage.immediate() as connection:
             existing = connection.execute(
-                "SELECT request_hash,state,turn_id FROM dispatch_records WHERE dispatch_attempt_id=?",
+                "SELECT request_hash,state,turn_id,request_id FROM dispatch_records "
+                "WHERE dispatch_attempt_id=?",
                 (attempt_id,),
             ).fetchone()
             if existing is not None:
                 if existing["request_hash"] != request_hash:
                     raise DispatchError("desktop dispatch identity conflicts with another request")
-                return DispatchResult(attempt_id, existing["turn_id"], existing["state"])
+                state = str(existing["state"])
+                if state == "outcome_unknown" and existing["request_id"] == "desktop-ui-submitted":
+                    state = "submitted_unconfirmed"
+                return DispatchResult(attempt_id, existing["turn_id"], state)
             connection.execute(
                 "INSERT INTO dispatch_attempts(dispatch_attempt_id,state,updated_at) "
                 "VALUES(?,'dispatching',?)",
@@ -220,8 +241,9 @@ class DesktopCodexDispatcher:
             connection.execute(
                 "INSERT INTO dispatch_records(dispatch_attempt_id,ingress_message_id,thread_id,"
                 "client_user_message_id,profile_hash,binding_epoch,identity_binding_epoch,fencing_token,"
-                "server_epoch,connection_epoch,request_hash,state,created_at,updated_at) "
-                "VALUES(?,?,?,?,? ,?,?,?,?,?,?,'prepared',?,?)",
+                "server_epoch,connection_epoch,request_hash,submitted_text_hash,has_attachments,"
+                "state,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'prepared',?,?)",
                 (
                     attempt_id,
                     ingress_message_id,
@@ -234,6 +256,8 @@ class DesktopCodexDispatcher:
                     self.server_epoch,
                     self.connection_epoch,
                     request_hash,
+                    desktop_submission_text_hash(text),
+                    int(bool(canonical_attachments)),
                     now,
                     now,
                 ),
@@ -266,6 +290,14 @@ class DesktopCodexDispatcher:
             )
             return DispatchResult(attempt_id, None, "outcome_unknown")
 
+        submitted = self.storage.connection.execute(
+            "UPDATE dispatch_records SET request_id='desktop-ui-submitted',updated_at=? "
+            "WHERE dispatch_attempt_id=? AND state='bytes_sending' AND request_id='desktop-ui'",
+            (utc_now(), attempt_id),
+        )
+        if submitted.rowcount != 1:
+            raise DispatchError("desktop submission acknowledgement lost compare-and-swap")
+
         recorded_message = self._wait_for_new_user_turn(
             snapshots,
             thread_id=thread_id,
@@ -283,7 +315,7 @@ class DesktopCodexDispatcher:
                 "WHERE dispatch_attempt_id=?",
                 (utc_now(), attempt_id),
             )
-            return DispatchResult(attempt_id, None, "outcome_unknown")
+            return DispatchResult(attempt_id, None, "submitted_unconfirmed")
 
         turn_id = recorded_message.turn_id
         response = {

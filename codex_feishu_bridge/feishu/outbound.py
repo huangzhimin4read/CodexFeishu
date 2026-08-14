@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 
+from ..codex.desktop_dispatch import matches_desktop_submission
 from ..models import EventKind, NormalizedEvent, RolloutBatch
 from ..runtime_storage import RuntimeStorage, utc_now
 from .client import FeishuClient, ProviderOutcome
@@ -120,6 +121,8 @@ class OutboundPipeline:
                 (event.thread_id, event.turn_id, event.item_id),
             ).fetchone()
             if returning is not None:
+                return 0
+            if self._reconcile_delayed_desktop_return(connection, event):
                 return 0
 
         display_text = event.text
@@ -249,6 +252,64 @@ class OutboundPipeline:
                     ),
                 )
         return len(units)
+
+    @staticmethod
+    def _reconcile_delayed_desktop_return(
+        connection: object,
+        event: NormalizedEvent,
+    ) -> bool:
+        """Claim a late rollout item for one confirmed desktop UI submission."""
+
+        candidates = connection.execute(
+            "SELECT dispatch_attempt_id,ingress_message_id,request_hash,"
+            "submitted_text_hash,has_attachments FROM dispatch_records "
+            "WHERE thread_id=? AND state='outcome_unknown' "
+            "AND request_id='desktop-ui-submitted' AND submitted_text_hash IS NOT NULL "
+            "AND julianday(created_at)>=julianday('now','-2 hours') "
+            "ORDER BY created_at,dispatch_attempt_id LIMIT 20",
+            (event.thread_id,),
+        ).fetchall()
+        for candidate in candidates:
+            if not matches_desktop_submission(
+                event.text,
+                str(candidate["submitted_text_hash"]),
+                has_attachments=bool(candidate["has_attachments"]),
+            ):
+                continue
+            updated = connection.execute(
+                "UPDATE dispatch_records SET state='accepted',turn_id=?,user_item_id=?,updated_at=? "
+                "WHERE dispatch_attempt_id=? AND state='outcome_unknown' "
+                "AND request_id='desktop-ui-submitted'",
+                (
+                    event.turn_id,
+                    event.item_id,
+                    utc_now(),
+                    candidate["dispatch_attempt_id"],
+                ),
+            )
+            if updated.rowcount != 1:
+                continue
+            response_hash = sha256(
+                f"{event.thread_id}\x1f{event.turn_id}\x1f{event.item_id}".encode("utf-8")
+            ).hexdigest()
+            connection.execute(
+                "UPDATE dispatch_attempts SET state='accepted',response_hash=?,updated_at=? "
+                "WHERE dispatch_attempt_id=? AND state IN ('dispatching','outcome_unknown')",
+                (response_hash, utc_now(), candidate["dispatch_attempt_id"]),
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO executed_command_tombstones("
+                "tombstone_key,content_hash,target_thread_id,dispatch_attempt_id,retain_until) "
+                "VALUES(?,?,?,?,datetime('now','+365 days'))",
+                (
+                    candidate["ingress_message_id"],
+                    candidate["request_hash"],
+                    event.thread_id,
+                    candidate["dispatch_attempt_id"],
+                ),
+            )
+            return True
+        return False
 
 
 class OutboxWorker:

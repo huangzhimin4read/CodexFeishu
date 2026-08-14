@@ -1,5 +1,4 @@
 import json
-import json
 import sqlite3
 import unicodedata
 from hashlib import sha256
@@ -7,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from codex_feishu_bridge.codex.desktop_dispatch import desktop_submission_text_hash
 from codex_feishu_bridge.feishu.client import ProviderOutcome, ProviderResult
 from codex_feishu_bridge.feishu.outbound import OutboundPipeline, OutboxWorker
 from codex_feishu_bridge.feishu.tasks import TaskAnchorManager
@@ -126,6 +126,73 @@ def test_codex_user_message_is_mirrored_once_but_exact_feishu_return_is_suppress
 
         repeated = OutboundPipeline(storage).ingest_rollout_batch(batch)
         assert repeated.inserted_items == 0 and repeated.queued_messages == 0
+
+
+def test_delayed_desktop_user_item_claims_dispatch_and_is_suppressed_once(
+    tmp_path: Path,
+) -> None:
+    with RuntimeStorage(tmp_path / "runtime.db") as storage:
+        storage.initialize_runtime(sink_mode="outbound")
+        _prepare(storage)
+        storage.connection.execute(
+            "INSERT INTO dispatch_attempts(dispatch_attempt_id,state,updated_at) "
+            "VALUES('attempt','outcome_unknown',datetime('now'))"
+        )
+        storage.connection.execute(
+            "INSERT INTO dispatch_records(dispatch_attempt_id,ingress_message_id,thread_id,"
+            "client_user_message_id,profile_hash,binding_epoch,identity_binding_epoch,fencing_token,"
+            "server_epoch,connection_epoch,request_hash,request_id,submitted_text_hash,"
+            "has_attachments,state,created_at,updated_at) "
+            "VALUES('attempt','ingress','thread','client','desktop-host-managed',1,1,1,"
+            "'server','connection','request','desktop-ui-submitted',?,0,'outcome_unknown',"
+            "datetime('now'),datetime('now'))",
+            (desktop_submission_text_hash("来自飞书"),),
+        )
+        batch = RolloutBatch(
+            (
+                _event(
+                    EventKind.COMMENTARY,
+                    "late-feishu-item",
+                    "来自飞书\n",
+                    source_type="user_message",
+                ),
+            ),
+            SourceCursor("source", "file", 100, "hash", "1"),
+        )
+
+        result = OutboundPipeline(storage).ingest_rollout_batch(batch)
+
+        assert result.inserted_items == 1 and result.queued_messages == 0
+        record = storage.connection.execute(
+            "SELECT state,turn_id,user_item_id FROM dispatch_records"
+        ).fetchone()
+        assert tuple(record) == ("accepted", "turn", "late-feishu-item")
+        assert storage.connection.execute(
+            "SELECT state FROM dispatch_attempts"
+        ).fetchone()[0] == "accepted"
+        assert storage.connection.execute(
+            "SELECT COUNT(*) FROM executed_command_tombstones"
+        ).fetchone()[0] == 1
+
+        second = RolloutBatch(
+            (
+                NormalizedEvent(
+                    "thread",
+                    "turn-2",
+                    "codex-identical-item",
+                    EventKind.COMMENTARY,
+                    0,
+                    "来自飞书",
+                    "user_message",
+                ),
+            ),
+            SourceCursor("source", "file", 200, "hash-2", "1"),
+        )
+        repeated_text = OutboundPipeline(storage).ingest_rollout_batch(second)
+        assert repeated_text.inserted_items == 1 and repeated_text.queued_messages == 1
+        assert storage.connection.execute(
+            "SELECT item_id FROM provider_outbox"
+        ).fetchone()[0] == "codex-identical-item"
 
 
 def test_runtime_outbox_completion_is_compare_and_swap(tmp_path: Path) -> None:
@@ -419,7 +486,7 @@ def test_runtime_v2_database_is_upgraded_without_rebinding(tmp_path: Path) -> No
         assert (row["active_chat_id"], row["conversation_mode"]) == ("legacy-chat", "p2p")
         assert storage.connection.execute(
             "SELECT value FROM runtime_metadata WHERE key='runtime_schema_version'"
-        ).fetchone()[0] == "12"
+        ).fetchone()[0] == "13"
         columns = {
             row[1]
             for row in storage.connection.execute("PRAGMA table_info(task_bindings)").fetchall()

@@ -17,7 +17,7 @@ def utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-RUNTIME_SCHEMA_VERSION = 12
+RUNTIME_SCHEMA_VERSION = 13
 
 
 class RuntimeStorage(BridgeStorage):
@@ -259,6 +259,8 @@ class RuntimeStorage(BridgeStorage):
                 connection_epoch TEXT NOT NULL,
                 request_hash TEXT NOT NULL,
                 request_id TEXT,
+                submitted_text_hash TEXT,
+                has_attachments INTEGER NOT NULL DEFAULT 0 CHECK(has_attachments IN (0,1)),
                 turn_id TEXT,
                 user_item_id TEXT,
                 state TEXT NOT NULL CHECK(state IN (
@@ -378,6 +380,8 @@ class RuntimeStorage(BridgeStorage):
             },
             "dispatch_records": {
                 "user_item_id": "TEXT",
+                "submitted_text_hash": "TEXT",
+                "has_attachments": "INTEGER NOT NULL DEFAULT 0 CHECK(has_attachments IN (0,1))",
             },
             "approval_actions": {
                 "server_epoch": "TEXT NOT NULL DEFAULT ''",

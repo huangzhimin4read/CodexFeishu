@@ -374,3 +374,34 @@ def test_unconfirmed_desktop_dispatch_does_not_claim_retry_or_submission(
         assert row is not None
         assert "未能确认已提交 Codex" in row["body_json"]
         assert "重试" not in row["body_json"]
+
+
+def test_desktop_ui_submission_queues_truthful_submitted_receipt(tmp_path: Path) -> None:
+    contract = tmp_path / "contract.json"
+    contract.write_text("{}", encoding="utf-8")
+    with RuntimeStorage(tmp_path / "runtime.db") as storage:
+        storage.initialize_runtime(sink_mode="control")
+        service = object.__new__(BridgeService)
+        service.storage = storage
+        service.config = SimpleNamespace(
+            feishu=FeishuBinding(
+                "tenant",
+                "app",
+                "owner",
+                "fallback",
+                "target",
+                contract,
+                ConversationMode.TOPIC_GROUP,
+                "topic-chat",
+            )
+        )
+
+        service._queue_submitted_unconfirmed_ack("incoming", "thread")
+
+        row = storage.connection.execute(
+            "SELECT logical_message_id,body_json FROM provider_outbox "
+            "WHERE logical_message_id='submitted-ack:incoming'"
+        ).fetchone()
+        assert row is not None
+        assert "已提交 Codex" in row["body_json"]
+        assert "未能确认" not in row["body_json"]

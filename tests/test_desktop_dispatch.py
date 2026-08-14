@@ -1,4 +1,5 @@
 import json
+from hashlib import sha256
 from pathlib import Path
 
 from codex_feishu_bridge.codex.desktop_dispatch import DesktopCodexDispatcher
@@ -87,7 +88,7 @@ def test_desktop_dispatch_is_accepted_only_after_new_rollout_user_turn(tmp_path:
             "accepted",
             TURN_ID,
             "user-item",
-            "desktop-ui",
+            "desktop-ui-submitted",
             "desktop-host-managed",
         )
         assert storage.connection.execute(
@@ -125,7 +126,9 @@ def test_plain_confirmation_rejects_extra_blank_line_or_body_change() -> None:
     )
 
 
-def test_desktop_dispatch_does_not_claim_submission_without_rollout_proof(tmp_path: Path) -> None:
+def test_desktop_dispatch_reports_ui_submission_while_rollout_confirmation_is_pending(
+    tmp_path: Path,
+) -> None:
     codex_home = tmp_path / "codex-home"
     session_dir = codex_home / "sessions" / "2026" / "08" / "14"
     session_dir.mkdir(parents=True)
@@ -145,10 +148,16 @@ def test_desktop_dispatch_does_not_claim_submission_without_rollout_proof(tmp_pa
             text="not recorded",
             required_capability="text",
         )
-        assert result.state == "outcome_unknown" and result.turn_id is None
-        assert storage.connection.execute(
-            "SELECT state FROM dispatch_records"
-        ).fetchone()[0] == "outcome_unknown"
+        assert result.state == "submitted_unconfirmed" and result.turn_id is None
+        record = storage.connection.execute(
+            "SELECT state,request_id,submitted_text_hash,has_attachments FROM dispatch_records"
+        ).fetchone()
+        assert tuple(record) == (
+            "outcome_unknown",
+            "desktop-ui-submitted",
+            sha256(b"not recorded").hexdigest(),
+            0,
+        )
         assert storage.connection.execute(
             "SELECT COUNT(*) FROM executed_command_tombstones"
         ).fetchone()[0] == 0

@@ -16,7 +16,7 @@ Codex 飞书桥接是一个由单一 owner 在 Windows 本机运行的 OpenAI Co
 - **适合手机阅读：**同步过程消息和 final；发送项目内 Markdown 图片及 Codex 可见图像；文件引用只显示 `🔗【文件名】`，不暴露本地路径；普通链接只显示可读标签。
 - **严格入站路由：**派发前核对 owner、tenant、app、群、话题根、回复后代、任务 epoch、项目根目录和能力授权。
 - **远程输入：**文本、图片和文件分别授权。默认桌面投递路径先定位精确任务，再通过 Codex 应用自身的辅助功能输入面提交，桌面始终是唯一写入者。附件受大小与格式限制，校验并哈希后写入选定项目的 inbox，不自动执行或解压。
-- **真实提交状态：**只有完全一致的用户输入出现在 Codex 新增 rollout 字节中，飞书才显示“已提交 Codex”；无法确认时保持未确认状态，不虚构人类式“已读”。
+- **真实提交状态：**Codex 桌面输入器确认提交后，飞书显示“已提交 Codex”；如 steer 需要等待当前工具边界，桥接器会在精确 rollout user item 稍后出现时完成认领。桌面输入结果本身不明确时才保持未确认状态，不虚构人类式“已读”。
 - **精确去重：**来源去重不依赖正文相同；rollout item、dispatch 记录、provider outbox 和飞书 UUID 共同保证重启及重试后的至多一次可见投递。
 - **远程审批和控制：**短时、单次审批动作，以及受约束的状态、任务、profile、append、stop 和 hard-stop 命令。
 - **Windows 身份隔离：**飞书凭据只属于 Broker 身份；Codex App Server 可通过另一个非管理员 worker 身份运行，并使用 ACL 与 Job Object 建立边界。
@@ -110,13 +110,21 @@ python -m codex_feishu_bridge verify-config --config config/offline.example.toml
 
 ## Codex 插件
 
-仓库包含可选的 `codex-feishu` 插件，为 Codex 提供经过校验的管理 skill 和不暴露路径的只读健康检查；常驻消息传输仍由 Windows 计划任务服务负责。
+本仓库同时也是一个公开的 Codex 插件 marketplace。可选的 `codex-feishu` 插件为 Codex 提供经过校验的管理 skill 和不暴露路径的只读健康检查；常驻消息传输仍由 Windows 计划任务服务负责。
 
-如需通过个人 marketplace 发布或安装，将 `plugins/codex-feishu/` 复制到该 marketplace 的插件源码目录，在其 `marketplace.json` 中登记本地来源，然后执行：
+可以直接把下面这句话交给 Codex：
+
+```text
+请从 GitHub 仓库 huangzhimin4read/CodexFeishu 添加插件 marketplace，安装并启用 codex-feishu 插件，验证安装状态后告诉我结果。
+```
+
+也可以在 PowerShell 中一行安装：
 
 ```powershell
-codex plugin add codex-feishu@personal
+codex plugin marketplace add huangzhimin4read/CodexFeishu --ref main; if ($LASTEXITCODE -eq 0) { codex plugin add codex-feishu@codex-feishu }
 ```
+
+安装后新建一个 Codex 任务，使插件被加载。插件安装的是 Codex 管理工作流；桥接服务本身仍需按照下文完成仓库部署，并配置私有飞书凭据。
 
 插件本身不包含凭据、租户 ID、真实运行配置或运行数据库。
 

@@ -16,7 +16,7 @@ The project is designed around a fail-closed control plane. Unknown identities, 
 - **Readable mobile output:** process/final messages, project-local Markdown images, visible Codex image outputs, file-citation labels, and link destinations hidden from provider-visible text.
 - **Strict inbound routing:** owner, tenant, app, chat, topic root, ancestry, task epoch, project root, and capability binding are checked before dispatch.
 - **Remote inputs:** independently gated text, image, and file input. The default desktop delivery path navigates to the exact task and submits through the Codex app's own accessibility surface, so the desktop remains the single writer. Files are bounded, hashed, stored under the selected project's inbox, and never auto-executed or auto-extracted.
-- **Truthful submission status:** Feishu reports `submitted` only after the exact user input appears in newly appended Codex rollout bytes. Ambiguous or unavailable outcomes remain unconfirmed; no human-style “read” state is invented.
+- **Truthful submission status:** Feishu reports `submitted` after the Codex desktop writer acknowledges the submission. The bridge then reconciles the exact rollout user item when it appears, including steers delayed until a tool boundary. Ambiguous desktop outcomes remain unconfirmed; no human-style “read” state is invented.
 - **Exact de-duplication:** source de-duplication never depends on equal message bodies. Rollout item identity, dispatch records, provider outbox identity, and Feishu UUIDs preserve at-most-once visible delivery across retries and restarts.
 - **Approvals and controls:** short-lived single-use approval actions plus scoped status, task, profile, append, stop, and hard-stop commands.
 - **Windows isolation:** provider credentials stay with the broker identity; Codex App Server work can run through a separate non-administrator worker identity with ACL and Job Object boundaries.
@@ -110,13 +110,21 @@ Remote text, images, files, approvals, and controls are separate booleans and re
 
 ## Codex plugin
 
-The repository includes an optional `codex-feishu` plugin. It gives Codex a validated management skill and a path-safe, read-only health check for this bridge; the Windows scheduled service remains the always-on transport.
+The repository is also a public Codex plugin marketplace. Its optional `codex-feishu` plugin gives Codex a validated management skill and a path-safe, read-only health check for this bridge; the Windows scheduled service remains the always-on transport.
 
-To publish or install the plugin through a personal marketplace, copy `plugins/codex-feishu/` into that marketplace's plugin source directory, register the local source in its `marketplace.json`, and run:
+Give Codex this one-line request:
+
+```text
+Add the plugin marketplace from GitHub repository huangzhimin4read/CodexFeishu, install and enable the codex-feishu plugin, verify its status, and report the result.
+```
+
+Or install it directly from PowerShell:
 
 ```powershell
-codex plugin add codex-feishu@personal
+codex plugin marketplace add huangzhimin4read/CodexFeishu --ref main; if ($LASTEXITCODE -eq 0) { codex plugin add codex-feishu@codex-feishu }
 ```
+
+Start a new Codex session after installation so the plugin is loaded. Installing the plugin adds the Codex management workflow; the bridge service itself still requires the repository setup and private Feishu credentials described below.
 
 The plugin deliberately contains no credentials, tenant IDs, live configuration, or runtime database.
 
