@@ -1,0 +1,89 @@
+{
+  "schema_version": 2,
+  "tenant_key": "REPLACE_TENANT_KEY",
+  "app_id": "REPLACE_APP_ID",
+  "published_version": "REPLACE_PUBLISHED_VERSION",
+  "bot_enabled": true,
+  "p2p_only": false,
+  "group_topic_enabled": true,
+  "source_export_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "event_subscriptions": ["im.message.receive_v1"],
+  "event_scopes": ["im:message.group_msg"],
+  "callback_subscriptions": ["card.action.trigger"],
+  "endpoints": [
+    {
+      "name": "tenant_token",
+      "method": "POST",
+      "path": "/open-apis/auth/v3/tenant_access_token/internal",
+      "exact_scopes": [],
+      "administrator_approved": true,
+      "enabled": true,
+      "rate_limit": {"capacity": 1, "refill_per_second": 0.1}
+    },
+    {
+      "name": "preflight_chat",
+      "method": "GET",
+      "path": "/open-apis/im/v1/chats/{chat_id}",
+      "exact_scopes": ["im:chat:readonly"],
+      "administrator_approved": false,
+      "enabled": false,
+      "rate_limit": {"capacity": 1, "refill_per_second": 1.0}
+    },
+    {
+      "name": "upload_image",
+      "method": "POST",
+      "path": "/open-apis/im/v1/images",
+      "exact_scopes": ["im:resource"],
+      "administrator_approved": false,
+      "enabled": false,
+      "response_image_key_pointer": "/data/image_key",
+      "rate_limit": {"capacity": 2, "refill_per_second": 2.0}
+    },
+    {
+      "name": "download_message_resource",
+      "method": "GET",
+      "path": "/open-apis/im/v1/messages/{message_id}/resources/{file_key}",
+      "exact_scopes": ["im:message:readonly"],
+      "administrator_approved": false,
+      "enabled": false,
+      "response_binary": true,
+      "rate_limit": {"capacity": 2, "refill_per_second": 2.0}
+    },
+    {
+      "name": "send_message",
+      "method": "POST",
+      "path": "/open-apis/im/v1/messages",
+      "exact_scopes": ["im:message:send_as_bot"],
+      "administrator_approved": false,
+      "enabled": false,
+      "receive_id_type": "chat_id",
+      "uuid_window_seconds": 3600,
+      "uuid_location": "json_body",
+      "response_message_id_pointer": "/data/message_id",
+      "response_thread_id_pointer": "/data/thread_id",
+      "rate_limit": {"capacity": 4, "refill_per_second": 4.0, "user_chat_capacity": 4, "user_chat_refill_per_second": 4.0}
+    },
+    {
+      "name": "reply_message",
+      "method": "POST",
+      "path": "/open-apis/im/v1/messages/{message_id}/reply",
+      "exact_scopes": ["im:message:send_as_bot"],
+      "administrator_approved": false,
+      "enabled": false,
+      "uuid_window_seconds": 3600,
+      "uuid_location": "json_body",
+      "response_message_id_pointer": "/data/message_id",
+      "response_thread_id_pointer": "/data/thread_id",
+      "rate_limit": {"capacity": 4, "refill_per_second": 4.0, "user_chat_capacity": 4, "user_chat_refill_per_second": 4.0}
+    },
+    {
+      "name": "update_chat",
+      "method": "PUT",
+      "path": "/open-apis/im/v1/chats/{chat_id}",
+      "exact_scopes": ["im:chat:update"],
+      "administrator_approved": false,
+      "enabled": false,
+      "rate_limit": {"capacity": 10, "refill_per_second": 10.0}
+    }
+  ]
+}

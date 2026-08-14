@@ -1,0 +1,39 @@
+schema_version = 1
+mode = "shadow"
+retention_days = 30
+command_ttl_seconds = 86400
+
+[paths]
+workspace_root = ".."
+database = "../.runtime/bridge.sqlite3"
+shadow_database = "../.runtime/shadow.sqlite3"
+codex_home = "C:/Users/REPLACE_USER/.codex"
+codex_executable = "C:/Users/REPLACE_USER/AppData/Roaming/npm/node_modules/@openai/codex/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe"
+schema_root = "../generated/codex/0.145.0"
+status = "../.runtime/status.json"
+backup_root = "../.runtime/backups"
+
+[allowlist]
+projects = ["C:/Projects/REPLACE_PROJECT"]
+threads = ["REPLACE_THREAD_ID"]
+
+[feishu]
+tenant_key = "REPLACE_TENANT_KEY"
+app_id = "REPLACE_APP_ID"
+owner_open_id = "REPLACE_OWNER_OPEN_ID"
+p2p_chat_id = "REPLACE_P2P_CHAT_ID"
+# Optional parallel surface. Keep the P2P database/config unchanged while a
+# private ordinary group with topic-form messages is being canaried.
+#conversation_mode = "topic_group"
+#topic_chat_id = "REPLACE_PRIVATE_TOPIC_GROUP_CHAT_ID"
+credential_target = "CodexFeishu/REPLACE_APP_ID/app_secret"
+endpoint_contract = "tenant-contract.example.json"
+
+# Optional. When present and provisioned under a distinct Windows SID, all
+# App Server traffic uses the isolated worker and dangerFullAccess can pass its
+# identity boundary. The Scheduled Task is an external administrator Gate.
+#[worker_isolation]
+#worker_sid = "S-1-5-21-REPLACE_WORKER_SID"
+#scheduled_task_name = "CodexFeishu-Worker-Owner"
+#launch_file = "D:/CodexFeishuWorker/launch.json"
+#worker_codex_home = "D:/CodexFeishuWorker/codex-home"

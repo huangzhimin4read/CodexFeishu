@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "tenant_key": "REPLACE_TENANT_KEY",
+  "app_id": "REPLACE_APP_ID",
+  "published_version": "REPLACE_PUBLISHED_VERSION",
+  "bot_enabled": true,
+  "p2p_only": true,
+  "group_topic_enabled": false,
+  "source_export_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "endpoints": [
+    {
+      "name": "tenant_token",
+      "method": "POST",
+      "path": "/open-apis/auth/v3/tenant_access_token/internal",
+      "exact_scopes": [],
+      "administrator_approved": true,
+      "enabled": true,
+      "rate_limit": {"capacity": 1, "refill_per_second": 0.1}
+    },
+    {
+      "name": "preflight_chat",
+      "method": "GET",
+      "path": "/open-apis/im/v1/chats/{chat_id}",
+      "exact_scopes": ["REPLACE_WITH_CONSOLE_SCOPE"],
+      "administrator_approved": false,
+      "enabled": false,
+      "rate_limit": {"capacity": 1, "refill_per_second": 1.0}
+    },
+    {
+      "name": "upload_image",
+      "method": "POST",
+      "path": "/open-apis/im/v1/images",
+      "exact_scopes": ["im:resource"],
+      "administrator_approved": false,
+      "enabled": false,
+      "response_image_key_pointer": "/data/image_key",
+      "rate_limit": {"capacity": 2, "refill_per_second": 2.0}
+    },
+    {
+      "name": "send_message",
+      "method": "POST",
+      "path": "/open-apis/im/v1/messages",
+      "exact_scopes": ["REPLACE_WITH_CONSOLE_SCOPE"],
+      "administrator_approved": false,
+      "enabled": false,
+      "receive_id_type": "chat_id",
+      "uuid_window_seconds": 3600,
+      "uuid_location": "json_body",
+      "response_message_id_pointer": "/data/message_id",
+      "rate_limit": {"capacity": 4, "refill_per_second": 4.0, "user_chat_capacity": 4, "user_chat_refill_per_second": 4.0}
+    },
+    {
+      "name": "reply_message",
+      "method": "POST",
+      "path": "/open-apis/im/v1/messages/{message_id}/reply",
+      "exact_scopes": ["REPLACE_WITH_CONSOLE_SCOPE"],
+      "administrator_approved": false,
+      "enabled": false,
+      "uuid_window_seconds": 3600,
+      "uuid_location": "json_body",
+      "response_message_id_pointer": "/data/message_id",
+      "rate_limit": {"capacity": 4, "refill_per_second": 4.0, "user_chat_capacity": 4, "user_chat_refill_per_second": 4.0}
+    },
+    {
+      "name": "list_messages",
+      "method": "GET",
+      "path": "/open-apis/im/v1/messages",
+      "exact_scopes": ["REPLACE_WITH_CONSOLE_SCOPE"],
+      "administrator_approved": false,
+      "enabled": false,
+      "rate_limit": {"capacity": 2, "refill_per_second": 2.0}
+    },
+    {
+      "name": "update_message",
+      "method": "PUT",
+      "path": "/open-apis/im/v1/messages/{message_id}",
+      "exact_scopes": ["REPLACE_WITH_CONSOLE_SCOPE"],
+      "administrator_approved": false,
+      "enabled": false,
+      "rate_limit": {"capacity": 2, "refill_per_second": 2.0}
+    },
+    {
+      "name": "delete_message",
+      "method": "DELETE",
+      "path": "/open-apis/im/v1/messages/{message_id}",
+      "exact_scopes": ["REPLACE_WITH_CONSOLE_SCOPE"],
+      "administrator_approved": false,
+      "enabled": false,
+      "rate_limit": {"capacity": 2, "refill_per_second": 2.0}
+    }
+  ]
+}

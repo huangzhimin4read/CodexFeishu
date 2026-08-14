@@ -1,0 +1,18 @@
+schema_version = 1
+mode = "offline"
+retention_days = 30
+command_ttl_seconds = 86400
+
+[paths]
+workspace_root = ".."
+database = "../.runtime/offline.sqlite3"
+shadow_database = "../.runtime/offline-shadow.sqlite3"
+codex_home = "../.runtime/offline-codex-home"
+codex_executable = "../NOT_USED_IN_OFFLINE_MODE.exe"
+schema_root = "../generated/codex/0.145.0"
+status = "../.runtime/offline-status.json"
+backup_root = "../.runtime/offline-backups"
+
+[allowlist]
+projects = []
+threads = []

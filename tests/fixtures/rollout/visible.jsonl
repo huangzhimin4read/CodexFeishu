@@ -1,0 +1,5 @@
+{"type":"session_meta","payload":{"rollout_version":"1","id":"fixture-session"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","phase":"commentary","thread_id":"thread-1","turn_id":"turn-1","item_id":"item-1","revision":0,"content":[{"type":"output_text","text":"progress"}]}}
+{"type":"event_msg","payload":{"type":"agent_message","phase":"commentary","thread_id":"thread-1","turn_id":"turn-1","item_id":"item-1","revision":0,"message":"progress"}}
+{"type":"response_item","payload":{"type":"message","role":"system","phase":"final_answer","thread_id":"thread-1","turn_id":"turn-1","item_id":"hidden-1","content":[{"type":"output_text","text":"must not leave"}]}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","thread_id":"thread-1","turn_id":"turn-1","item_id":"item-2","revision":0,"content":[{"type":"output_text","text":"done"}]}}

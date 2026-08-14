@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-feishu-bridge"
+version = "0.1.0"
+description = "Fail-closed local bridge core for Codex and Feishu"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Codex Feishu Bridge contributors" }]
+keywords = ["codex", "feishu", "lark", "bridge", "automation"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Communications :: Chat",
+]
+dependencies = [
+  "httpx==0.28.1",
+  "jsonschema==4.25.1",
+  "lark-oapi==1.5.3",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest==9.0.2",
+]
+
+[project.scripts]
+codex-feishu-bridge = "codex_feishu_bridge.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["codex_feishu_bridge*"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers"
+testpaths = ["tests"]
+markers = [
+  "integration: starts a disposable local Codex App Server",
+]

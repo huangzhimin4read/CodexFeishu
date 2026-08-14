@@ -1,0 +1,32 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+build/
+dist/
+*.egg-info/
+evidence/
+.runtime/
+runtime/
+*.db
+*.db-wal
+*.db-shm
+
+# Machine- and tenant-specific configuration. Commit only *.example.* files.
+config/runtime.toml
+config/runtime.p2p-rollback.toml
+config/runtime.topic-group.toml
+config/runtime.topic-group.remote.toml
+config/tenant-console-export.json
+config/tenant-console-topic-group.json
+config/tenant-contract.json
+config/tenant-contract.topic-group.json
+
+# Private implementation history and host-specific operational records.
+CODEX_FEISHU_BRIDGE_ACCEPTANCE_PLAN.md
+CODEX_FEISHU_BRIDGE_IMPLEMENTATION_PLAN.md
+CODEX_FEISHU_BRIDGE_TASK_LIST.md
+CODEX_FEISHU_BRIDGE_THREE_PARTY_REVIEW.md
+OPERATIONS_RUNBOOK.md

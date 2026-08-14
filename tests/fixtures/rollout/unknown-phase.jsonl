@@ -1,0 +1,1 @@
+{"type":"response_item","payload":{"type":"message","role":"assistant","phase":"mystery","thread_id":"thread-1","turn_id":"turn-1","item_id":"item-x","content":[{"type":"output_text","text":"ambiguous"}]}}
