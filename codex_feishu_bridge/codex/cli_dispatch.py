@@ -22,6 +22,7 @@ from .desktop_dispatch import desktop_submission_text_hash
 @dataclass(frozen=True, slots=True)
 class _RecordedCliUserMessage:
     turn_id: str
+    item_id: str
 
 
 _LEADING_IMAGE = re.compile(
@@ -106,6 +107,13 @@ class CodexCliDispatcher:
             and isinstance(item.get("text"), str)
         )
 
+    @staticmethod
+    def _item_id(record: dict[str, Any], payload: dict[str, Any]) -> str | None:
+        for value in (payload.get("item_id"), payload.get("id"), record.get("item_id")):
+            if isinstance(value, str) and value:
+                return value
+        return None
+
     def _find_new_user_turn(
         self,
         snapshots: dict[Path, int],
@@ -155,7 +163,9 @@ class CodexCliDispatcher:
                     expected_hash,
                     has_images=has_images,
                 ):
-                    return _RecordedCliUserMessage(turn_id)
+                    item_id = self._item_id(record, payload)
+                    if item_id is not None:
+                        return _RecordedCliUserMessage(turn_id, item_id)
         return None
 
     def _wait_for_new_user_turn(
@@ -279,7 +289,7 @@ class CodexCliDispatcher:
         except CodexCliActiveWriter as exc:
             # The CLI rejected the second writer before emitting thread.started,
             # so no Codex turn exists. Remove only this prepared attempt and let
-            # the service use the desktop-owned writer with the same ingress id.
+            # the service retain and retry the same ingress id once the task is idle.
             with self.storage.immediate() as connection:
                 removed = connection.execute(
                     "DELETE FROM dispatch_records WHERE dispatch_attempt_id=? "
@@ -335,12 +345,17 @@ class CodexCliDispatcher:
             )
             return DispatchResult(attempt_id, None, "submitted_unconfirmed")
 
-        response = {"threadId": thread_id, "turnId": recorded.turn_id, "writer": "codex-cli"}
+        response = {
+            "threadId": thread_id,
+            "turnId": recorded.turn_id,
+            "itemId": recorded.item_id,
+            "writer": "codex-cli",
+        }
         with self.storage.immediate() as connection:
             accepted = connection.execute(
-                "UPDATE dispatch_records SET state='accepted',turn_id=?,updated_at=? "
+                "UPDATE dispatch_records SET state='accepted',turn_id=?,user_item_id=?,updated_at=? "
                 "WHERE dispatch_attempt_id=? AND state='bytes_sending'",
-                (recorded.turn_id, utc_now(), attempt_id),
+                (recorded.turn_id, recorded.item_id, utc_now(), attempt_id),
             )
             if accepted.rowcount != 1:
                 raise DispatchError("CLI acceptance lost compare-and-swap")

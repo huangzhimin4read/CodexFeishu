@@ -80,7 +80,7 @@ For Feishu to Codex, require:
 
 - A new ingress row for the Feishu message.
 - An accepted dispatch record containing the exact target Codex task and turn ID.
-- With `delivery = "cli"`, a new `task_started -> turn_context -> user message` sequence whose exact body and image wrappers match the ingress; CLI user records intentionally have no stable user-item ID.
+- With `delivery = "cli"`, a new `task_started -> turn_context -> user message` sequence whose exact body and image wrappers match the ingress, plus a stable persisted user-item ID. Store that item ID on the accepted dispatch so the exact Feishu-origin user message is suppressed when rollout observation sees it again.
 - The same user text and images visible in the Codex task reader or rollout record.
 
 For Codex to Feishu, require:

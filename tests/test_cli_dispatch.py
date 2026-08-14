@@ -23,9 +23,16 @@ TURN_ID = "019fff28-c672-75a0-b5da-5b4ceee1b5b9"
 
 
 class RecordingGateway:
-    def __init__(self, rollout: Path, *, append_context: bool = True) -> None:
+    def __init__(
+        self,
+        rollout: Path,
+        *,
+        append_context: bool = True,
+        item_id: str | None = "cli-user-item",
+    ) -> None:
         self.rollout = rollout
         self.append_context = append_context
+        self.item_id = item_id
         self.calls = []
 
     def submit(self, thread_id, text, *, image_paths=(), cwd):
@@ -54,6 +61,7 @@ class RecordingGateway:
                         "payload": {
                             "type": "message",
                             "role": "user",
+                            "id": self.item_id,
                             "content": [
                                 {
                                     "type": "input_text",
@@ -132,7 +140,7 @@ def test_cli_dispatch_is_accepted_only_after_new_contextualized_user_turn(
         assert tuple(record) == (
             "accepted",
             TURN_ID,
-            None,
+            "cli-user-item",
             "codex-cli-started",
             "cli-host-managed",
         )
@@ -166,6 +174,31 @@ def test_cli_dispatch_does_not_accept_replay_user_record_before_turn_context(
         assert storage.connection.execute(
             "SELECT state FROM dispatch_records"
         ).fetchone()[0] == "outcome_unknown"
+
+
+def test_cli_dispatch_requires_stable_user_item_identity(tmp_path: Path) -> None:
+    codex_home = tmp_path / "codex-home"
+    session_dir = codex_home / "sessions"
+    session_dir.mkdir(parents=True)
+    rollout = session_dir / f"rollout-test-{THREAD_ID}.jsonl"
+    rollout.write_text('{"type":"session_meta"}\n', encoding="utf-8")
+    gateway = RecordingGateway(rollout, item_id=None)
+    with RuntimeStorage(tmp_path / "runtime.db") as storage:
+        storage.initialize_runtime(sink_mode="control")
+        _task_binding(storage, tmp_path)
+        result = _dispatcher(
+            storage, gateway, codex_home, confirmation_seconds=0.01
+        ).dispatch(
+            ingress_message_id="idless-user",
+            thread_id=THREAD_ID,
+            text="没有稳定身份",
+            required_capability="text",
+        )
+        assert result.state == "submitted_unconfirmed" and result.turn_id is None
+        record = storage.connection.execute(
+            "SELECT state,turn_id,user_item_id FROM dispatch_records"
+        ).fetchone()
+        assert tuple(record) == ("outcome_unknown", None, None)
 
 
 def test_cli_active_writer_failure_rolls_back_only_prepared_attempt(
