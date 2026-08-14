@@ -12,9 +12,10 @@ from pathlib import Path
 from ..codex.desktop_dispatch import matches_desktop_submission
 from ..models import EventKind, NormalizedEvent, RolloutBatch
 from ..runtime_storage import RuntimeStorage, utc_now
-from .client import FeishuClient, ProviderOutcome
+from .client import FeishuClient, ProviderOutcome, ProviderResult
 from .formatter import format_text_chunks
 from .images import LocalImage, extract_local_images
+from .user_cli import LarkCliUserSender
 
 
 _NAMESPACE = uuid.UUID("72f6d750-c92e-54e8-ae48-88cff2d6a9af")
@@ -37,10 +38,18 @@ class EnqueueResult:
 
 
 class OutboundPipeline:
-    def __init__(self, storage: RuntimeStorage) -> None:
+    def __init__(
+        self,
+        storage: RuntimeStorage,
+        *,
+        owner_display_name: str = "用户",
+        user_messages_as_user: bool = False,
+    ) -> None:
         if storage.sink_mode not in {"outbound", "control", "pilot"}:
             raise PermissionError("provider pipeline requires an outbound-capable database")
         self.storage = storage
+        self.owner_display_name = owner_display_name.strip() or "用户"
+        self.user_messages_as_user = user_messages_as_user
 
     def ingest_rollout_batch(self, batch: RolloutBatch) -> EnqueueResult:
         """Atomically store source items, outbox rows, and source cursor."""
@@ -126,8 +135,12 @@ class OutboundPipeline:
                 return 0
 
         display_text = event.text
-        if event.source_type == "user_message":
-            display_text = f"👤 {display_text}" if display_text else "👤 用户图片"
+        if event.source_type == "user_message" and not self.user_messages_as_user:
+            display_text = (
+                f"👤 {self.owner_display_name}：{display_text}"
+                if display_text
+                else f"👤 {self.owner_display_name}：图片"
+            )
         extracted = extract_local_images(
             display_text, project_root=Path(str(binding["project_root"]))
         )
@@ -196,11 +209,12 @@ class OutboundPipeline:
         for index, (logical_id, message_type, marker, body_json, image) in enumerate(
             units, start=1
         ):
-            operation = (
-                "final"
-                if event.kind is EventKind.FINAL_ANSWER and index == len(units)
-                else "commentary"
-            )
+            if event.source_type == "user_message":
+                operation = "user_message"
+            elif event.kind is EventKind.FINAL_ANSWER and index == len(units):
+                operation = "final"
+            else:
+                operation = "commentary"
             body_hash = (
                 image.content_hash
                 if image is not None
@@ -313,10 +327,20 @@ class OutboundPipeline:
 
 
 class OutboxWorker:
-    def __init__(self, storage: RuntimeStorage, client: FeishuClient, instance_id: str) -> None:
+    def __init__(
+        self,
+        storage: RuntimeStorage,
+        client: FeishuClient,
+        instance_id: str,
+        *,
+        user_message_sender: LarkCliUserSender | None = None,
+        owner_display_name: str = "用户",
+    ) -> None:
         self.storage = storage
         self.client = client
         self.instance_id = instance_id
+        self.user_message_sender = user_message_sender
+        self.owner_display_name = owner_display_name.strip() or "用户"
 
     def run_once(self) -> bool:
         lease_until = (datetime.now(UTC) + timedelta(seconds=30)).isoformat().replace("+00:00", "Z")
@@ -445,13 +469,43 @@ class OutboxWorker:
                         )
                 return True
             body = {"image_key": str(image["image_key"])}
-        if row["endpoint_name"] == "send_message":
+        result: ProviderResult | None = None
+        outbound_body_json = row["body_json"]
+        if (
+            row["operation"] == "user_message"
+            and msg_type == "text"
+            and self.user_message_sender is not None
+            and row["endpoint_name"] == "reply_message"
+            and row["target_message_id"]
+            and isinstance(body.get("text"), str)
+        ):
+            result = self.user_message_sender.reply_text(
+                message_id=str(row["target_message_id"]),
+                text=str(body["text"]),
+                reply_in_thread=bool(row["reply_in_thread"]),
+                idempotency_key=str(row["stable_uuid"]),
+            )
+            if result.outcome is ProviderOutcome.PERMANENT:
+                fallback_body = {
+                    "text": f"👤 {self.owner_display_name}：{body['text']}"
+                }
+                outbound_body_json = json.dumps(
+                    fallback_body, ensure_ascii=False, separators=(",", ":")
+                )
+                self.storage.upsert_runtime_metadata(
+                    "user_cli_last_fallback",
+                    {"at": utc_now(), "code": result.code},
+                )
+                result = None
+        if result is not None:
+            pass
+        elif row["endpoint_name"] == "send_message":
             result = self.client.call(
                 "send_message",
                 query={"receive_id_type": "chat_id"},
                 json_body={
                     "receive_id": binding["chat_id"],
-                    "content": row["body_json"],
+                    "content": outbound_body_json,
                     "msg_type": msg_type,
                     "uuid": row["stable_uuid"],
                 },
@@ -462,7 +516,7 @@ class OutboxWorker:
                 "update_message",
                 path_parameters={"message_id": row["target_message_id"]},
                 json_body={
-                    "content": row["body_json"],
+                    "content": outbound_body_json,
                     "msg_type": msg_type,
                 },
                 chat_id=binding["chat_id"],
@@ -472,7 +526,7 @@ class OutboxWorker:
                 row["endpoint_name"],
                 path_parameters={"message_id": row["target_message_id"]},
                 json_body={
-                    "content": row["body_json"],
+                    "content": outbound_body_json,
                     "msg_type": msg_type,
                     "reply_in_thread": bool(row["reply_in_thread"]),
                     "uuid": row["stable_uuid"],

@@ -21,6 +21,11 @@ threads = ["REPLACE_THREAD_ID"]
 tenant_key = "REPLACE_TENANT_KEY"
 app_id = "REPLACE_APP_ID"
 owner_open_id = "REPLACE_OWNER_OPEN_ID"
+owner_display_name = "REPLACE_OWNER_DISPLAY_NAME"
+# Optional: send Codex-authored user messages through official lark-cli UAT.
+# Startup verifies that the profile's authorized user Open ID equals owner_open_id.
+#user_message_identity = "lark_cli_user"
+#lark_cli_profile = "REPLACE_LARK_CLI_PROFILE"
 p2p_chat_id = "REPLACE_P2P_CHAT_ID"
 # Optional parallel surface. Keep the P2P database/config unchanged while a
 # private ordinary group with topic-form messages is being canaried.
@@ -37,3 +42,7 @@ endpoint_contract = "tenant-contract.example.json"
 #scheduled_task_name = "CodexFeishu-Worker-Owner"
 #launch_file = "D:/CodexFeishuWorker/launch.json"
 #worker_codex_home = "D:/CodexFeishuWorker/codex-home"
+
+# For topic-group remote input, prefer [remote] delivery="cli". It submits
+# through `codex exec resume`, including local images via `--image`, without
+# depending on desktop focus or clipboard state.

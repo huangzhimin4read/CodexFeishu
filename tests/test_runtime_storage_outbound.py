@@ -116,16 +116,150 @@ def test_codex_user_message_is_mirrored_once_but_exact_feishu_return_is_suppress
             ),
             SourceCursor("source", "file", 100, "hash", "1"),
         )
-        result = OutboundPipeline(storage).ingest_rollout_batch(batch)
+        result = OutboundPipeline(storage, owner_display_name="项目所有者").ingest_rollout_batch(batch)
         assert result.inserted_items == 2 and result.queued_messages == 1
         row = storage.connection.execute(
             "SELECT item_id,body_json FROM provider_outbox"
         ).fetchone()
         assert row["item_id"] == "from-codex"
-        assert json.loads(row["body_json"])["text"].startswith("👤 Codex 用户消息")
+        assert json.loads(row["body_json"])["text"].startswith("👤 项目所有者：Codex 用户消息")
 
         repeated = OutboundPipeline(storage).ingest_rollout_batch(batch)
         assert repeated.inserted_items == 0 and repeated.queued_messages == 0
+
+
+def test_codex_user_message_can_be_replied_as_authorized_feishu_user(
+    tmp_path: Path,
+) -> None:
+    class RecordingClient:
+        calls: list[tuple[str, dict]] = []
+
+        def call(self, endpoint: str, **kwargs):
+            self.calls.append((endpoint, kwargs))
+            return ProviderResult(ProviderOutcome.CONFIRMED, "0", message_id="bot-reply")
+
+    class RecordingUserSender:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def reply_text(self, **kwargs):
+            self.calls.append(kwargs)
+            return ProviderResult(
+                ProviderOutcome.CONFIRMED,
+                "0",
+                message_id="user-reply",
+            )
+
+    with RuntimeStorage(tmp_path / "runtime.db") as storage:
+        storage.initialize_runtime(sink_mode="outbound")
+        _prepare(storage, conversation_mode="topic_group")
+        batch = RolloutBatch(
+            (
+                _event(
+                    EventKind.COMMENTARY,
+                    "codex-user",
+                    "这是 Codex 端输入",
+                    source_type="user_message",
+                ),
+            ),
+            SourceCursor("source", "file", 100, "hash", "1"),
+        )
+        queued = OutboundPipeline(
+            storage,
+            owner_display_name="项目所有者",
+            user_messages_as_user=True,
+        ).ingest_rollout_batch(batch)
+        row = storage.connection.execute(
+            "SELECT operation,body_json FROM provider_outbox"
+        ).fetchone()
+        assert queued.queued_messages == 1
+        assert row["operation"] == "user_message"
+        assert json.loads(row["body_json"])["text"] == "这是 Codex 端输入"
+
+        client = RecordingClient()
+        sender = RecordingUserSender()
+        assert OutboxWorker(
+            storage,
+            client,
+            "worker",
+            user_message_sender=sender,
+            owner_display_name="项目所有者",
+        ).run_once()
+
+        assert client.calls == []
+        assert sender.calls == [
+            {
+                "message_id": "anchor",
+                "text": "这是 Codex 端输入",
+                "reply_in_thread": True,
+                "idempotency_key": storage.connection.execute(
+                    "SELECT stable_uuid FROM provider_outbox"
+                ).fetchone()[0],
+            }
+        ]
+        delivered = storage.connection.execute(
+            "SELECT state,provider_message_id FROM provider_outbox"
+        ).fetchone()
+        assert tuple(delivered) == ("confirmed", "user-reply")
+        assert storage.connection.execute(
+            "SELECT COUNT(*) FROM transient_messages"
+        ).fetchone()[0] == 0
+        ancestry = storage.connection.execute(
+            "SELECT source,thread_id,parent_id FROM message_ancestry WHERE message_id='user-reply'"
+        ).fetchone()
+        assert tuple(ancestry) == ("outbound", "thread", "anchor")
+
+
+def test_user_cli_auth_failure_falls_back_to_labeled_bot_message(
+    tmp_path: Path,
+) -> None:
+    class RecordingClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        def call(self, endpoint: str, **kwargs):
+            self.calls.append((endpoint, kwargs))
+            return ProviderResult(ProviderOutcome.CONFIRMED, "0", message_id="bot-reply")
+
+    class ExpiredUserSender:
+        def reply_text(self, **kwargs):
+            return ProviderResult(ProviderOutcome.PERMANENT, "user_cli_token_expired")
+
+    with RuntimeStorage(tmp_path / "runtime.db") as storage:
+        storage.initialize_runtime(sink_mode="outbound")
+        _prepare(storage, conversation_mode="topic_group")
+        OutboundPipeline(
+            storage,
+            user_messages_as_user=True,
+        ).ingest_rollout_batch(
+            RolloutBatch(
+                (
+                    _event(
+                        EventKind.COMMENTARY,
+                        "codex-user",
+                        "用户输入",
+                        source_type="user_message",
+                    ),
+                ),
+                SourceCursor("source", "file", 100, "hash", "1"),
+            )
+        )
+        client = RecordingClient()
+        assert OutboxWorker(
+            storage,
+            client,
+            "worker",
+            user_message_sender=ExpiredUserSender(),
+            owner_display_name="项目所有者",
+        ).run_once()
+
+        assert len(client.calls) == 1
+        sent = json.loads(client.calls[0][1]["json_body"]["content"])
+        assert sent["text"] == "👤 项目所有者：用户输入"
+        fallback = storage.connection.execute(
+            "SELECT value FROM runtime_metadata WHERE key='user_cli_last_fallback'"
+        ).fetchone()
+        assert fallback is not None and "user_cli_token_expired" in fallback[0]
 
 
 def test_delayed_desktop_user_item_claims_dispatch_and_is_suppressed_once(
@@ -153,6 +287,10 @@ def test_delayed_desktop_user_item_claims_dispatch_and_is_suppressed_once(
                 _event(
                     EventKind.COMMENTARY,
                     "late-feishu-item",
+                    '\n<in-app-browser-context source="ambient-ui-state">\n'
+                    "Codex supplied browser state.\n"
+                    "</in-app-browser-context>\n\n"
+                    "## My request:\n"
                     "来自飞书\n",
                     source_type="user_message",
                 ),

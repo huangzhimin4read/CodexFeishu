@@ -1,8 +1,9 @@
-"""Fenced Feishu dispatch through the Codex desktop-owned writer."""
+"""Fenced Feishu dispatch through the persisted Codex CLI writer."""
 
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from collections.abc import Callable, Sequence
@@ -13,72 +14,53 @@ from typing import Any
 
 from ..runtime_storage import RuntimeStorage, utc_now
 from ..security.jcs import canonicalize
-from .controller import DispatchError, DispatchResult
-from .desktop_gateway import CodexDesktopGateway, DesktopGatewayError
+from .cli_gateway import CodexCliActiveWriter, CodexCliGateway, CodexCliGatewayError
+from .controller import DispatchBusy, DispatchError, DispatchResult
+from .desktop_dispatch import desktop_submission_text_hash
 
 
 @dataclass(frozen=True, slots=True)
-class _RecordedUserMessage:
+class _RecordedCliUserMessage:
     turn_id: str
-    item_id: str
 
 
-def _without_one_terminal_newline(value: str) -> str:
-    if value.endswith("\r\n"):
-        return value[:-2]
-    if value.endswith("\n"):
-        return value[:-1]
-    return value
+_LEADING_IMAGE = re.compile(
+    r'\A(?:\s*<image\b[^>]*\bpath="[^"]+"[^>]*>\s*</image>\s*)+',
+    re.IGNORECASE,
+)
 
 
-def desktop_submission_text_hash(value: str) -> str:
-    """Hash desktop input while tolerating Codex's one terminal newline."""
-
-    return sha256(_without_one_terminal_newline(value).encode("utf-8")).hexdigest()
-
-
-def matches_desktop_submission(
+def matches_cli_submission(
     actual_text: str | None,
     expected_hash: str,
     *,
-    has_attachments: bool,
+    has_images: bool,
 ) -> bool:
-    """Match one observed user item to a pending desktop submission."""
-
     if actual_text is None:
         return False
     if desktop_submission_text_hash(actual_text) == expected_hash:
         return True
-    marker = "\n## My request:\n"
-    if marker not in actual_text:
+    if not has_images:
         return False
-    preamble, request_text = actual_text.rsplit(marker, 1)
-    stripped_preamble = preamble.strip()
-    files_wrapper = has_attachments and stripped_preamble.startswith(
-        "# Files mentioned by the user:"
-    )
-    browser_wrapper = (
-        stripped_preamble.startswith('<in-app-browser-context source="ambient-ui-state">')
-        and stripped_preamble.endswith("</in-app-browser-context>")
-    )
-    return (files_wrapper or browser_wrapper) and (
-        desktop_submission_text_hash(request_text) == expected_hash
+    without_images = _LEADING_IMAGE.sub("", actual_text)
+    return without_images != actual_text and (
+        desktop_submission_text_hash(without_images) == expected_hash
     )
 
 
-class DesktopCodexDispatcher:
-    """Submit to the desktop UI, then prove acceptance from new rollout bytes."""
+class CodexCliDispatcher:
+    """Submit with the CLI, then prove the exact new turn from rollout bytes."""
 
     def __init__(
         self,
         storage: RuntimeStorage,
-        gateway: CodexDesktopGateway,
+        gateway: CodexCliGateway,
         *,
         codex_home: Path,
         authorize: Callable[..., tuple[int, int, int]],
         server_epoch: str,
         connection_epoch: str,
-        rollout_confirmation_seconds: float = 20.0,
+        rollout_confirmation_seconds: float = 30.0,
     ) -> None:
         self.storage = storage
         self.gateway = gateway
@@ -101,32 +83,27 @@ class DesktopCodexDispatcher:
         return snapshots
 
     @staticmethod
+    def _turn_id(payload: dict[str, Any]) -> str | None:
+        direct = payload.get("turn_id")
+        if isinstance(direct, str) and direct:
+            return direct
+        metadata = payload.get("internal_chat_message_metadata_passthrough")
+        nested = metadata.get("turn_id") if isinstance(metadata, dict) else None
+        return nested if isinstance(nested, str) and nested else None
+
+    @staticmethod
     def _message_text(payload: dict[str, Any]) -> str | None:
         if payload.get("type") != "message" or payload.get("role") != "user":
             return None
         content = payload.get("content")
         if not isinstance(content, list):
             return None
-        parts = [
+        return "".join(
             item.get("text")
             for item in content
             if isinstance(item, dict)
             and item.get("type") == "input_text"
             and isinstance(item.get("text"), str)
-        ]
-        return "".join(parts)
-
-    @staticmethod
-    def _matches_submitted_text(
-        actual_text: str | None,
-        expected_text: str,
-        *,
-        has_attachments: bool,
-    ) -> bool:
-        return matches_desktop_submission(
-            actual_text,
-            desktop_submission_text_hash(expected_text),
-            has_attachments=has_attachments,
         )
 
     def _find_new_user_turn(
@@ -134,9 +111,9 @@ class DesktopCodexDispatcher:
         snapshots: dict[Path, int],
         *,
         thread_id: str,
-        expected_text: str,
-        has_attachments: bool,
-    ) -> _RecordedUserMessage | None:
+        expected_hash: str,
+        has_images: bool,
+    ) -> _RecordedCliUserMessage | None:
         current = self._rollout_snapshots(thread_id)
         for path, size in current.items():
             start = snapshots.get(path, 0)
@@ -148,30 +125,37 @@ class DesktopCodexDispatcher:
                     raw = handle.read()
             except OSError:
                 continue
+            started_turns: set[str] = set()
+            contextualized_turns: set[str] = set()
             for line in raw.splitlines():
                 try:
                     record = json.loads(line.decode("utf-8"))
                 except (UnicodeDecodeError, json.JSONDecodeError):
                     continue
+                payload = record.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                if record.get("type") == "event_msg" and payload.get("type") == "task_started":
+                    turn_id = self._turn_id(payload)
+                    if turn_id is not None:
+                        started_turns.add(turn_id)
+                    continue
+                if record.get("type") == "turn_context":
+                    turn_id = self._turn_id(payload)
+                    if turn_id in started_turns:
+                        contextualized_turns.add(turn_id)
+                    continue
                 if record.get("type") != "response_item":
                     continue
-                payload = record.get("payload")
-                if not isinstance(payload, dict) or not self._matches_submitted_text(
-                    self._message_text(payload),
-                    expected_text,
-                    has_attachments=has_attachments,
-                ):
+                turn_id = self._turn_id(payload)
+                if turn_id not in contextualized_turns:
                     continue
-                metadata = payload.get("internal_chat_message_metadata_passthrough")
-                turn_id = metadata.get("turn_id") if isinstance(metadata, dict) else None
-                item_id = payload.get("item_id") or payload.get("id")
-                if (
-                    isinstance(turn_id, str)
-                    and turn_id
-                    and isinstance(item_id, str)
-                    and item_id
+                if matches_cli_submission(
+                    self._message_text(payload),
+                    expected_hash,
+                    has_images=has_images,
                 ):
-                    return _RecordedUserMessage(turn_id, item_id)
+                    return _RecordedCliUserMessage(turn_id)
         return None
 
     def _wait_for_new_user_turn(
@@ -179,16 +163,16 @@ class DesktopCodexDispatcher:
         snapshots: dict[Path, int],
         *,
         thread_id: str,
-        expected_text: str,
-        has_attachments: bool,
-    ) -> _RecordedUserMessage | None:
+        expected_hash: str,
+        has_images: bool,
+    ) -> _RecordedCliUserMessage | None:
         deadline = time.monotonic() + self.rollout_confirmation_seconds
         while time.monotonic() < deadline:
             match = self._find_new_user_turn(
                 snapshots,
                 thread_id=thread_id,
-                expected_text=expected_text,
-                has_attachments=has_attachments,
+                expected_hash=expected_hash,
+                has_images=has_images,
             )
             if match is not None:
                 return match
@@ -202,27 +186,36 @@ class DesktopCodexDispatcher:
         thread_id: str,
         text: str,
         required_capability: str,
-        attachment_paths: Sequence[Path] = (),
+        image_paths: Sequence[Path] = (),
     ) -> DispatchResult:
         binding_epoch, identity_epoch, fencing_token = self.authorize(
             thread_id,
             required_capability=required_capability,
         )
-        canonical_attachments = tuple(
-            str(Path(path).resolve(strict=True)) for path in attachment_paths
+        task = self.storage.connection.execute(
+            "SELECT project_root FROM task_bindings WHERE thread_id=? AND opted_in=1",
+            (thread_id,),
+        ).fetchone()
+        if task is None:
+            raise DispatchError("CLI dispatch target task disappeared")
+        project_root = Path(str(task["project_root"])).resolve(strict=True)
+        canonical_images = tuple(
+            str(Path(path).resolve(strict=True)) for path in image_paths
         )
         request = {
-            "method": "desktop/submit",
+            "method": "cli/exec-resume",
             "params": {
                 "threadId": thread_id,
                 "text": text,
-                "attachments": canonical_attachments,
+                "images": canonical_images,
+                "cwd": str(project_root),
             },
         }
         request_hash = sha256(canonicalize(request)).hexdigest()
+        text_hash = desktop_submission_text_hash(text)
         attempt_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"codex-feishu:{ingress_message_id}"))
         client_message_id = str(
-            uuid.uuid5(uuid.NAMESPACE_OID, f"codex-feishu-desktop:{ingress_message_id}")
+            uuid.uuid5(uuid.NAMESPACE_OID, f"codex-feishu-cli:{ingress_message_id}")
         )
         now = utc_now()
         with self.storage.immediate() as connection:
@@ -233,9 +226,9 @@ class DesktopCodexDispatcher:
             ).fetchone()
             if existing is not None:
                 if existing["request_hash"] != request_hash:
-                    raise DispatchError("desktop dispatch identity conflicts with another request")
+                    raise DispatchError("CLI dispatch identity conflicts with another request")
                 state = str(existing["state"])
-                if state == "outcome_unknown" and existing["request_id"] == "desktop-ui-submitted":
+                if state == "outcome_unknown" and existing["request_id"] == "codex-cli-started":
                     state = "submitted_unconfirmed"
                 return DispatchResult(attempt_id, existing["turn_id"], state)
             connection.execute(
@@ -254,15 +247,15 @@ class DesktopCodexDispatcher:
                     ingress_message_id,
                     thread_id,
                     client_message_id,
-                    "desktop-host-managed",
+                    "cli-host-managed",
                     binding_epoch,
                     identity_epoch,
                     fencing_token,
                     self.server_epoch,
                     self.connection_epoch,
                     request_hash,
-                    desktop_submission_text_hash(text),
-                    int(bool(canonical_attachments)),
+                    text_hash,
+                    int(bool(canonical_images)),
                     now,
                     now,
                 ),
@@ -270,19 +263,40 @@ class DesktopCodexDispatcher:
 
         snapshots = self._rollout_snapshots(thread_id)
         updated = self.storage.connection.execute(
-            "UPDATE dispatch_records SET state='bytes_sending',request_id='desktop-ui',updated_at=? "
+            "UPDATE dispatch_records SET state='bytes_sending',request_id='codex-cli',updated_at=? "
             "WHERE dispatch_attempt_id=? AND state='prepared' AND fencing_token=?",
             (utc_now(), attempt_id, fencing_token),
         )
         if updated.rowcount != 1:
-            raise DispatchError("desktop dispatch lost its service fence")
+            raise DispatchError("CLI dispatch lost its service fence")
         try:
-            gateway_result = self.gateway.submit(
+            self.gateway.submit(
                 thread_id,
                 text,
-                attachments=tuple(Path(path) for path in canonical_attachments),
+                image_paths=tuple(Path(path) for path in canonical_images),
+                cwd=project_root,
             )
-        except DesktopGatewayError:
+        except CodexCliActiveWriter as exc:
+            # The CLI rejected the second writer before emitting thread.started,
+            # so no Codex turn exists. Remove only this prepared attempt and let
+            # the service use the desktop-owned writer with the same ingress id.
+            with self.storage.immediate() as connection:
+                removed = connection.execute(
+                    "DELETE FROM dispatch_records WHERE dispatch_attempt_id=? "
+                    "AND state='bytes_sending' AND request_id='codex-cli'",
+                    (attempt_id,),
+                )
+                if removed.rowcount != 1:
+                    raise DispatchError(
+                        "CLI active-writer rollback lost compare-and-swap"
+                    ) from exc
+                connection.execute(
+                    "DELETE FROM dispatch_attempts WHERE dispatch_attempt_id=? "
+                    "AND state='dispatching'",
+                    (attempt_id,),
+                )
+            raise DispatchBusy("Codex task already has an active writer") from exc
+        except CodexCliGatewayError:
             self.storage.connection.execute(
                 "UPDATE dispatch_records SET state='outcome_unknown',updated_at=? "
                 "WHERE dispatch_attempt_id=? AND state='bytes_sending'",
@@ -296,20 +310,19 @@ class DesktopCodexDispatcher:
             return DispatchResult(attempt_id, None, "outcome_unknown")
 
         submitted = self.storage.connection.execute(
-            "UPDATE dispatch_records SET request_id='desktop-ui-submitted',updated_at=? "
-            "WHERE dispatch_attempt_id=? AND state='bytes_sending' AND request_id='desktop-ui'",
+            "UPDATE dispatch_records SET request_id='codex-cli-started',updated_at=? "
+            "WHERE dispatch_attempt_id=? AND state='bytes_sending' AND request_id='codex-cli'",
             (utc_now(), attempt_id),
         )
         if submitted.rowcount != 1:
-            raise DispatchError("desktop submission acknowledgement lost compare-and-swap")
-
-        recorded_message = self._wait_for_new_user_turn(
+            raise DispatchError("CLI start acknowledgement lost compare-and-swap")
+        recorded = self._wait_for_new_user_turn(
             snapshots,
             thread_id=thread_id,
-            expected_text=text,
-            has_attachments=bool(canonical_attachments),
+            expected_hash=text_hash,
+            has_images=bool(canonical_images),
         )
-        if recorded_message is None:
+        if recorded is None:
             self.storage.connection.execute(
                 "UPDATE dispatch_records SET state='outcome_unknown',updated_at=? "
                 "WHERE dispatch_attempt_id=? AND state='bytes_sending'",
@@ -322,22 +335,15 @@ class DesktopCodexDispatcher:
             )
             return DispatchResult(attempt_id, None, "submitted_unconfirmed")
 
-        turn_id = recorded_message.turn_id
-        response = {
-            "threadId": thread_id,
-            "turnId": turn_id,
-            "userItemId": recorded_message.item_id,
-            "submitted": gateway_result.submitted,
-            "usedForegroundFallback": gateway_result.used_foreground_fallback,
-        }
+        response = {"threadId": thread_id, "turnId": recorded.turn_id, "writer": "codex-cli"}
         with self.storage.immediate() as connection:
             accepted = connection.execute(
-                "UPDATE dispatch_records SET state='accepted',turn_id=?,user_item_id=?,updated_at=? "
+                "UPDATE dispatch_records SET state='accepted',turn_id=?,updated_at=? "
                 "WHERE dispatch_attempt_id=? AND state='bytes_sending'",
-                (turn_id, recorded_message.item_id, utc_now(), attempt_id),
+                (recorded.turn_id, utc_now(), attempt_id),
             )
             if accepted.rowcount != 1:
-                raise DispatchError("desktop acceptance lost compare-and-swap")
+                raise DispatchError("CLI acceptance lost compare-and-swap")
             connection.execute(
                 "UPDATE dispatch_attempts SET state='accepted',response_hash=?,updated_at=? "
                 "WHERE dispatch_attempt_id=? AND state='dispatching'",
@@ -348,4 +354,4 @@ class DesktopCodexDispatcher:
                 "dispatch_attempt_id,retain_until) VALUES(?,?,?,?,datetime('now','+365 days'))",
                 (ingress_message_id, request_hash, thread_id, attempt_id),
             )
-        return DispatchResult(attempt_id, turn_id, "accepted")
+        return DispatchResult(attempt_id, recorded.turn_id, "accepted")

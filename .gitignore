@@ -10,6 +10,7 @@ dist/
 evidence/
 .runtime/
 runtime/
+.codex-feishu-inbox/
 *.db
 *.db-wal
 *.db-shm

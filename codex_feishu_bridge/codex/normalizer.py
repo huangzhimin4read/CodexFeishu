@@ -30,7 +30,8 @@ class RolloutNormalizer:
     _USER_REQUEST_MARKER = "\n## My request:\n"
     _ATTACHED_FILE = re.compile(r"^## ([^:\r\n]+): [^\r\n]+$", re.MULTILINE)
     _IMAGE_REFERENCE = re.compile(
-        r'<image\s+name=.*?\s+path="[^"]+">\s*', re.IGNORECASE
+        r'<image\b[^>]*\bpath="[^"]+"[^>]*>\s*(?:</image>\s*)?|</image>\s*',
+        re.IGNORECASE,
     )
     _CODEX_DELEGATION = re.compile(
         r"\A<codex_delegation>\s*"
@@ -88,6 +89,14 @@ class RolloutNormalizer:
             return None
         role = payload.get("role")
         if role == "user":
+            # ``codex exec resume`` persists a replay prelude containing
+            # developer/user context messages before the new turn_context.
+            # Those replay records intentionally have no item identity and are
+            # not newly authored user messages.  They cannot participate in
+            # exactly-once mirroring, so ignore them just like id-less
+            # agent_message previews.
+            if not (payload.get("item_id") or payload.get("id") or record.get("item_id")):
+                return None
             content = payload.get("content")
             images = self._extract_content_images(content)
             text = self._extract_user_text(content, has_images=bool(images))

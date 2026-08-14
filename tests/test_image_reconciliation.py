@@ -212,3 +212,77 @@ def test_unknown_text_rejects_same_body_from_another_application(tmp_path) -> No
         )
         result = SendReconciler(storage, Client()).reconcile(outbox_id)
         assert result == result.__class__("delivery_indeterminate", None, 0)
+
+
+def test_unknown_user_message_reconciles_only_from_configured_owner(tmp_path) -> None:
+    body_json = json.dumps(
+        {"text": "用户身份消息"}, ensure_ascii=False, separators=(",", ":")
+    )
+
+    class Contract:
+        @staticmethod
+        def endpoint(name: str, *, require_enabled: bool = True):
+            if name == "reply_message":
+                return SimpleNamespace(uuid_window_seconds=1, enabled=True)
+            if name == "list_messages":
+                return SimpleNamespace(uuid_window_seconds=None, enabled=True)
+            raise AssertionError(name)
+
+    class Client:
+        app_id = "app"
+        contract = Contract()
+
+        @staticmethod
+        def call(endpoint: str, **kwargs):
+            assert endpoint == "list_messages"
+            return ProviderResult(
+                ProviderOutcome.CONFIRMED,
+                "0",
+                response={
+                    "data": {
+                        "has_more": False,
+                        "items": [
+                            {
+                                "message_id": "owner-user-message",
+                                "msg_type": "text",
+                                "sender": {"sender_type": "user", "id": "owner"},
+                                "body": {"content": body_json},
+                            }
+                        ],
+                    }
+                },
+            )
+
+    with RuntimeStorage(tmp_path / "runtime.db") as storage:
+        storage.initialize_runtime(sink_mode="outbound")
+        storage.connection.execute(
+            "INSERT INTO identity_bindings(binding_key,tenant_key,app_id,owner_open_id,p2p_chat_id,"
+            "binding_epoch,contract_hash,state,updated_at) "
+            "VALUES('owner','tenant','app','owner','chat',1,'hash','active',?)",
+            (utc_now(),),
+        )
+        storage.connection.execute(
+            "INSERT INTO task_bindings(thread_id,project_root,chat_id,anchor_message_id,anchor_state,"
+            "anchor_uuid,anchor_marker,opted_in,updated_at) "
+            "VALUES('thread','D:/project','chat','anchor','confirmed','uuid','marker',1,?)",
+            (utc_now(),),
+        )
+        outbox_id = storage.enqueue_provider_message(
+            logical_message_id="user:unknown",
+            thread_id="thread",
+            operation="user_message",
+            endpoint_name="reply_message",
+            target_message_id="anchor",
+            stable_uuid="stable-user",
+            marker="marker",
+            body_json=body_json,
+            body_hash=sha256(body_json.encode()).hexdigest(),
+            priority=10,
+        )
+        old = (datetime.now(UTC) - timedelta(seconds=10)).isoformat().replace("+00:00", "Z")
+        storage.connection.execute(
+            "UPDATE provider_outbox SET state='unknown',first_attempt_at=? WHERE outbox_id=?",
+            (old, outbox_id),
+        )
+        result = SendReconciler(storage, Client()).reconcile(outbox_id)
+        assert result == result.__class__("confirmed", "owner-user-message", 1)

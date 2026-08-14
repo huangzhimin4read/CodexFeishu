@@ -19,6 +19,8 @@ from .codex.compatibility import CompatibilityMatrix
 from .codex.connection import AppServerConnection
 from .codex.isolated_transport import IsolatedAppServerTransport
 from .codex.controller import CodexController, DispatchBusy, DispatchError
+from .codex.cli_dispatch import CodexCliDispatcher
+from .codex.cli_gateway import CodexCliGateway
 from .codex.desktop_dispatch import DesktopCodexDispatcher
 from .codex.desktop_gateway import CodexDesktopGateway, DesktopGatewayError
 from .codex.execution_profile import ApprovalPolicy, ExecutionProfile, SandboxType
@@ -44,6 +46,7 @@ from .feishu.project_groups import ProjectGroupManager
 from .feishu.receipts import queue_ingress_status
 from .feishu.reconciliation import SendReconciler
 from .feishu.tasks import TaskAnchorManager
+from .feishu.user_cli import LarkCliUnavailable, LarkCliUserSender
 from .models import OwnershipState, RolloutBatch
 from .runtime_config import RuntimeConfig, RuntimeMode
 from .runtime_storage import RuntimeStorage, utc_now
@@ -145,6 +148,8 @@ class BridgeService:
         self.client: FeishuClient | None = None
         self.codex_connection: AppServerConnection | None = None
         self.controller: CodexController | None = None
+        self.cli_gateway: CodexCliGateway | None = None
+        self.cli_dispatcher: CodexCliDispatcher | None = None
         self.desktop_gateway: CodexDesktopGateway | None = None
         self.desktop_dispatcher: DesktopCodexDispatcher | None = None
         self.gateway: ApprovalGateway | None = None
@@ -273,7 +278,25 @@ class BridgeService:
                 chat_id=binding.target_chat_id,
                 last_activity_ms=automation.activity_after_ms,
             )
-        self.outbox_worker = OutboxWorker(self.storage, self.client, self.instance_id)
+        user_message_sender = None
+        if binding.user_message_identity == "lark_cli_user":
+            assert binding.lark_cli_profile is not None
+            try:
+                user_message_sender = LarkCliUserSender.discover(
+                    profile=binding.lark_cli_profile
+                )
+                user_message_sender.verify_identity(
+                    expected_open_id=binding.owner_open_id
+                )
+            except LarkCliUnavailable as exc:
+                raise ServiceError(str(exc)) from exc
+        self.outbox_worker = OutboxWorker(
+            self.storage,
+            self.client,
+            self.instance_id,
+            user_message_sender=user_message_sender,
+            owner_display_name=binding.owner_display_name,
+        )
         self.cleanup_worker = CleanupWorker(self.storage, self.client)
         cleanup = schedule_legacy_marker_cleanup(self.storage)
         if cleanup.queued:
@@ -368,7 +391,25 @@ class BridgeService:
             session_id=self.instance_id,
             auto_approve=self.config.remote.auto_approve,
         )
-        if self.config.remote.uses_desktop:
+        if getattr(self.config.remote, "uses_cli", False):
+            self.cli_gateway = CodexCliGateway(
+                self.config.codex_executable,
+                self.config.codex_home,
+            )
+            self.cli_dispatcher = CodexCliDispatcher(
+                self.storage,
+                self.cli_gateway,
+                codex_home=self.config.codex_home,
+                authorize=self.controller.require_dispatchable,
+                server_epoch=self.server_epoch,
+                connection_epoch=self.connection_epoch,
+            )
+            # Current Codex releases correctly reject a second CLI writer while
+            # the desktop owns an active turn. Keep only the desktop stop gateway
+            # available; UI submission cannot provide an authoritative persisted
+            # receipt, so busy CLI input is queued until the task becomes idle.
+            self.desktop_gateway = CodexDesktopGateway()
+        elif self.config.remote.uses_desktop:
             self.desktop_gateway = CodexDesktopGateway()
             self.desktop_dispatcher = DesktopCodexDispatcher(
                 self.storage,
@@ -463,7 +504,18 @@ class BridgeService:
 
     def _run_main_loop(self) -> None:
         reader = IncrementalRolloutReader()
-        pipeline = OutboundPipeline(self.storage)
+        pipeline = OutboundPipeline(
+            self.storage,
+            owner_display_name=(
+                self.config.feishu.owner_display_name
+                if self.config.feishu is not None
+                else "用户"
+            ),
+            user_messages_as_user=(
+                self.config.feishu is not None
+                and self.config.feishu.user_message_identity == "lark_cli_user"
+            ),
+        )
         last_preflight = time.monotonic()
         last_pilot_sample = 0.0
         last_project_refresh = 0.0
@@ -838,6 +890,8 @@ class BridgeService:
             "ORDER BY i.ingest_seq LIMIT 20"
         ).fetchall()
         for row in rows:
+            if self.ingress.suppress_if_outbound_echo(str(row["message_id"])):
+                continue
             command = parse_command(row["message_type"], row["text"])
             if command is not None:
                 if row["target_thread_id"] is None:
@@ -846,6 +900,8 @@ class BridgeService:
                 try:
                     profiles = self._profile_controller(row["target_thread_id"])
                     self._execute_control(row, command, profiles)
+                except DispatchBusy:
+                    self._defer_ingress(row)
                 except (
                     ControlError,
                     DispatchError,
@@ -865,7 +921,23 @@ class BridgeService:
             if input_items is None:
                 continue
             try:
-                if self.config.remote.uses_desktop:
+                if getattr(self.config.remote, "uses_cli", False):
+                    if self.cli_dispatcher is None:
+                        raise ServiceError("Codex CLI dispatcher is unavailable")
+                    image_paths = tuple(
+                        Path(str(item["path"]))
+                        for item in input_items
+                        if item.get("type") == "localImage"
+                        and isinstance(item.get("path"), str)
+                    )
+                    result = self.cli_dispatcher.dispatch(
+                        ingress_message_id=row["message_id"],
+                        thread_id=row["target_thread_id"],
+                        text=dispatch_text,
+                        required_capability=capability,
+                        image_paths=image_paths,
+                    )
+                elif self.config.remote.uses_desktop:
                     if self.desktop_dispatcher is None:
                         raise ServiceError("desktop Codex dispatcher is unavailable")
                     attachment_paths = tuple(
@@ -933,15 +1005,7 @@ class BridgeService:
                         row["message_id"], row["target_thread_id"]
                     )
             except DispatchBusy:
-                self._queue_pending_ack(
-                    row["message_id"], row["target_thread_id"]
-                )
-                self.storage.connection.execute(
-                    "UPDATE ingress_messages SET dispatch_not_before=datetime('now','+2 seconds'),"
-                    "dispatch_attempt_count=dispatch_attempt_count+1,last_dispatch_error='thread_busy' "
-                    "WHERE tenant_key=? AND app_id=? AND message_id=?",
-                    (row["tenant_key"], row["app_id"], row["message_id"]),
-                )
+                self._defer_ingress(row)
             except ProtocolError as exc:
                 # A pre-dispatch App Server timeout has not sent turn/start,
                 # so retain the ingress row and retry instead of rejecting the
@@ -1046,7 +1110,8 @@ class BridgeService:
             raise ValueError("attachment metadata missing")
         if attachment["state"] in {"pending", "retryable"}:
             due = self.storage.connection.execute(
-                "SELECT next_attempt_at<=datetime('now') FROM ingress_attachments WHERE message_id=?",
+                "SELECT julianday(next_attempt_at)<=julianday('now') "
+                "FROM ingress_attachments WHERE message_id=?",
                 (row["message_id"],),
             ).fetchone()[0]
             if not due:
@@ -1144,14 +1209,30 @@ class BridgeService:
         elif command.name in {"sandbox", "network", "approval-policy", "cwd", "writable"}:
             if row["target_thread_id"] is None:
                 raise ServiceError("profile command requires a selected task")
-            if self.config.remote.uses_desktop:
+            if getattr(
+                self.config.remote,
+                "uses_host_writer",
+                getattr(self.config.remote, "uses_desktop", False),
+            ):
                 raise ControlError(
-                    "desktop-owned tasks keep execution settings in the Codex desktop host"
+                    "host-owned tasks keep execution settings in the Codex task host"
                 )
             profile_hash = profiles.apply(row["target_thread_id"], command)
             acknowledgement = f"下一 turn 的执行配置已更新：{profile_hash[:12]}"
         elif command.name == "append":
-            if self.config.remote.uses_desktop:
+            if getattr(self.config.remote, "uses_cli", False):
+                if self.cli_dispatcher is None:
+                    raise ServiceError("Codex CLI dispatcher is unavailable")
+                result = self.cli_dispatcher.dispatch(
+                    ingress_message_id=row["message_id"],
+                    thread_id=row["target_thread_id"],
+                    text=command.argument,
+                    required_capability="controls",
+                )
+                if result.state != "accepted" or result.turn_id is None:
+                    raise ServiceError("Codex CLI append acceptance is unconfirmed")
+                acknowledgement = f"已提交给 Codex turn {result.turn_id[:12]}"
+            elif self.config.remote.uses_desktop:
                 if self.desktop_dispatcher is None:
                     raise ServiceError("desktop Codex dispatcher is unavailable")
                 result = self.desktop_dispatcher.dispatch(
@@ -1175,7 +1256,7 @@ class BridgeService:
                 )
                 acknowledgement = f"已追加到 turn {active['turn_id'][:12]}"
         elif command.name == "stop":
-            if self.config.remote.uses_desktop:
+            if getattr(self.config.remote, "uses_host_writer", False):
                 if self.desktop_gateway is None:
                     raise ServiceError("desktop Codex gateway is unavailable")
                 self.desktop_gateway.stop(row["target_thread_id"])
@@ -1206,7 +1287,11 @@ class BridgeService:
                 f"unknown={snapshot.ingress_indeterminate}；breakers={len(snapshot.open_breakers)}"
             )
         elif command.name == "help":
-            if self.config.remote.uses_desktop:
+            if getattr(
+                self.config.remote,
+                "uses_host_writer",
+                getattr(self.config.remote, "uses_desktop", False),
+            ):
                 acknowledgement = (
                     "命令：/tasks /status /append <text> /stop /hard-stop。"
                     "执行权限、目录和网络设置由 Codex 桌面当前任务管理。"
@@ -1270,6 +1355,16 @@ class BridgeService:
             status="pending",
             text="⏳ 尚未提交 Codex：当前任务忙碌或服务暂不可用，正在排队重试。",
             priority=210,
+        )
+
+    def _defer_ingress(self, row: Any) -> None:
+        """Retain an undispatched ingress message until Codex releases its writer."""
+        self._queue_pending_ack(row["message_id"], row["target_thread_id"])
+        self.storage.connection.execute(
+            "UPDATE ingress_messages SET dispatch_not_before=datetime('now','+15 seconds'),"
+            "dispatch_attempt_count=dispatch_attempt_count+1,last_dispatch_error='thread_busy' "
+            "WHERE tenant_key=? AND app_id=? AND message_id=?",
+            (row["tenant_key"], row["app_id"], row["message_id"]),
         )
 
     def _queue_submitted_unconfirmed_ack(

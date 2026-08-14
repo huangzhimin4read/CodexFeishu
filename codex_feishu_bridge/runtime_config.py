@@ -33,6 +33,7 @@ class RemoteDeliveryMode(StrEnum):
     """Writer that owns Feishu-originated Codex user turns."""
 
     APP_SERVER = "app_server"
+    CLI = "cli"
     DESKTOP = "desktop"
 
 
@@ -89,6 +90,14 @@ class RemoteCapabilities:
     def uses_desktop(self) -> bool:
         return self.enabled and self.receives_messages and self.delivery is RemoteDeliveryMode.DESKTOP
 
+    @property
+    def uses_cli(self) -> bool:
+        return self.enabled and self.receives_messages and self.delivery is RemoteDeliveryMode.CLI
+
+    @property
+    def uses_host_writer(self) -> bool:
+        return self.uses_desktop or self.uses_cli
+
 
 class RuntimeConfigurationError(ValueError):
     pass
@@ -120,6 +129,9 @@ class FeishuBinding:
     endpoint_contract: Path
     conversation_mode: ConversationMode = ConversationMode.P2P
     topic_chat_id: str | None = None
+    owner_display_name: str = "用户"
+    user_message_identity: str = "bot"
+    lark_cli_profile: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("tenant_key", "app_id", "owner_open_id", "p2p_chat_id"):
@@ -127,6 +139,20 @@ class FeishuBinding:
                 raise RuntimeConfigurationError(f"{name} must not be empty")
         if not self.credential_target.strip():
             raise RuntimeConfigurationError("credential_target must not be empty")
+        display_name = self.owner_display_name.strip()
+        if not display_name or len(display_name) > 80:
+            raise RuntimeConfigurationError("owner_display_name must contain 1..80 characters")
+        object.__setattr__(self, "owner_display_name", display_name)
+        if self.user_message_identity not in {"bot", "lark_cli_user"}:
+            raise RuntimeConfigurationError(
+                "user_message_identity must be bot or lark_cli_user"
+            )
+        if self.user_message_identity == "lark_cli_user" and not (
+            isinstance(self.lark_cli_profile, str) and self.lark_cli_profile.strip()
+        ):
+            raise RuntimeConfigurationError(
+                "lark_cli_user identity requires lark_cli_profile"
+            )
         try:
             mode = ConversationMode(self.conversation_mode)
         except ValueError as exc:
@@ -340,6 +366,9 @@ def load_runtime_config(path: Path) -> RuntimeConfig:
             "endpoint_contract",
             "conversation_mode",
             "topic_chat_id",
+            "owner_display_name",
+            "user_message_identity",
+            "lark_cli_profile",
         }
         extra = set(feishu_raw) - allowed_feishu
         if extra:
@@ -357,6 +386,13 @@ def load_runtime_config(path: Path) -> RuntimeConfig:
             topic_chat_id=(
                 str(feishu_raw["topic_chat_id"])
                 if feishu_raw.get("topic_chat_id") is not None
+                else None
+            ),
+            owner_display_name=str(feishu_raw.get("owner_display_name", "用户")),
+            user_message_identity=str(feishu_raw.get("user_message_identity", "bot")),
+            lark_cli_profile=(
+                str(feishu_raw["lark_cli_profile"])
+                if feishu_raw.get("lark_cli_profile") is not None
                 else None
             ),
         )

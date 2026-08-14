@@ -12,11 +12,11 @@ The project is designed around a fail-closed control plane. Unknown identities, 
 
 - **Project and task topics:** activity-triggered private groups for Codex projects, with one Feishu topic per Codex task.
 - **Reliable outbound delivery:** durable SQLite outbox, stable provider UUIDs, retry classification, delivery reconciliation, dead letters, and circuit breakers.
-- **Bidirectional message mirroring:** owner-authored Codex text, images, and path-free file labels are mirrored to the matching Feishu topic. The exact user item injected from Feishu is suppressed on its return path using durable `thread + turn + item` identity, so it is neither resubmitted nor displayed twice.
+- **Bidirectional message mirroring:** owner-authored Codex text, images, and path-free file labels are mirrored to the matching Feishu topic. Text can be sent as the authorized Feishu owner through the official `lark-cli`; startup fails closed unless that CLI user's Open ID exactly matches `owner_open_id`. Provider-message ancestry suppresses the resulting Feishu callback, including the send/receive race window, so the mirror cannot re-enter Codex as a new instruction. Bot fallback is visibly labeled with the configured owner display name. The exact user item injected from Feishu is suppressed on its return path using durable `thread + turn + item` identity, so it is neither resubmitted nor displayed twice.
 - **Readable mobile output:** process/final messages, project-local Markdown images, visible Codex image outputs, file-citation labels, and link destinations hidden from provider-visible text.
 - **Strict inbound routing:** owner, tenant, app, chat, topic root, ancestry, task epoch, project root, and capability binding are checked before dispatch.
-- **Remote inputs:** independently gated text, image, and file input. The default desktop delivery path navigates to the exact task and submits through the Codex app's own accessibility surface, so the desktop remains the single writer. Files are bounded, hashed, stored under the selected project's inbox, and never auto-executed or auto-extracted.
-- **Truthful submission status:** Feishu reports `submitted` after the Codex desktop writer acknowledges the submission. The bridge then reconciles the exact rollout user item when it appears, including steers delayed until a tool boundary. Ambiguous desktop outcomes remain unconfirmed; no human-style “read” state is invented.
+- **Remote inputs:** independently gated text, image, and file input. The recommended CLI path resumes the exact task and verifies the persisted rollout user turn. If Codex Desktop currently owns that task's writer, input remains durably queued and retries after the writer is released. Files are bounded, hashed, stored under the selected project's inbox, and never auto-executed or auto-extracted.
+- **Truthful submission status:** Feishu reports `submitted` only after the exact Codex user turn is confirmed. Busy tasks show one stable queued status; ambiguous outcomes remain unconfirmed. Feishu's hollow read-status circle is native client UI and cannot be cleared by the bridge or the normal Feishu API.
 - **Exact de-duplication:** source de-duplication never depends on equal message bodies. Rollout item identity, dispatch records, provider outbox identity, and Feishu UUIDs preserve at-most-once visible delivery across retries and restarts.
 - **Approvals and controls:** short-lived single-use approval actions plus scoped status, task, profile, append, stop, and hard-stop commands.
 - **Windows isolation:** provider credentials stay with the broker identity; Codex App Server work can run through a separate non-administrator worker identity with ACL and Job Object boundaries.
@@ -42,7 +42,7 @@ Feishu owner input
 identity/chat/root/epoch/capability checks
        |
        v
-Codex desktop accessibility -> desktop-owned writer -> exact task
+Codex CLI resume -> persisted user turn -> exact task
 ```
 
 The bridge is deliberately local. There is no public webhook and no project-wide directory crawl. Project and task identity come from the configured Codex state, while every writable project root remains allowlisted.
@@ -52,6 +52,7 @@ The bridge is deliberately local. There is no public webhook and no project-wide
 - Windows 10/11 or Windows Server with PowerShell and Task Scheduler
 - Python 3.11 or later
 - An installed Codex CLI/App Server executable
+- For owner-identity mirroring: the official `lark-cli`, authorized for the matching Feishu account; the installer guide detects it and walks through installation, configuration, login, and verification
 - A Feishu custom app and bot with tenant-approved permissions for the features you enable
 - Windows Credential Manager for the Feishu app secret
 - An interactive Codex desktop session for `delivery = "desktop"`
@@ -94,7 +95,7 @@ For a real local configuration:
    python -m codex_feishu_bridge run --config .runtime/runtime.toml
    ```
 
-Remote text, images, files, approvals, and controls are separate booleans and remain disabled until explicitly configured. Use `delivery = "desktop"` when Feishu input must appear in the Codex desktop task. The App Server compatibility path still requires a separately principalled worker.
+Remote text, images, files, approvals, and controls are separate booleans and remain disabled until explicitly configured. Prefer `delivery = "cli"`: it uses `codex exec resume` to persist Feishu text and images into the exact Codex task without relying on desktop focus. Codex permits one writer per task, so input received during an active desktop turn stays queued and retries after the turn releases the writer. `desktop` remains an explicit UI-automation alternative, while the App Server compatibility path still requires a separately principalled worker.
 
 ## Repository layout
 
@@ -125,6 +126,14 @@ codex plugin marketplace add huangzhimin4read/CodexFeishu --ref main; if ($LASTE
 ```
 
 Start a new Codex session after installation so the plugin is loaded. Installing the plugin adds the Codex management workflow; the bridge service itself still requires the repository setup and private Feishu credentials described below.
+
+The broker installer runs the Feishu CLI prerequisite guide by default (use `-SkipLarkCliSetup` only when owner-identity mirroring is intentionally disabled). The same guide can also be run directly:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_lark_cli.ps1 -Profile codex-feishu-owner
+```
+
+It installs only the official `@larksuite/cli` package and runs the guided `config init --new`, `auth login --recommend`, and `auth status --json --verify` flow. OAuth tokens remain under the CLI's local credential management and are never written to this repository. Skipping the step keeps bot notifications available but disables owner-identity mirroring.
 
 The plugin deliberately contains no credentials, tenant IDs, live configuration, or runtime database.
 

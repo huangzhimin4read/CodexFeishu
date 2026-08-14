@@ -64,6 +64,21 @@ def test_user_message_is_normalized_for_feishu_mirroring() -> None:
     assert event.item_id == "user-item"
 
 
+def test_cli_resume_replay_user_message_without_item_identity_is_ignored() -> None:
+    assert RolloutNormalizer().normalize(
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "thread_id": "thread",
+                "turn_id": "turn",
+                "content": [{"type": "input_text", "text": "replayed context"}],
+            },
+        }
+    ) is None
+
+
 def test_delegated_user_message_hides_internal_envelope_and_source_task() -> None:
     event = RolloutNormalizer().normalize(
         {
@@ -158,6 +173,16 @@ def test_user_attachment_wrapper_hides_paths_and_keeps_image_and_file_label() ->
     assert event.text == "请检查附件\n\n📎【README.md】"
     assert "D:/private" not in event.text and "C:\\private" not in event.text
     assert len(event.images) == 1 and event.images[0].content == content
+
+
+def test_cli_image_wrapper_does_not_leave_a_closing_tag() -> None:
+    assert RolloutNormalizer._extract_user_text(
+        [{
+            "type": "input_text",
+            "text": '<image name=[Image #1] path="C:\\private\\photo.jpg"></image>来自飞书',
+        }],
+        has_images=False,
+    ) == "来自飞书"
 
 
 def test_ambiguous_agent_message_is_not_guessed() -> None:

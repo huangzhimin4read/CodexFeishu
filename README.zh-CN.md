@@ -12,11 +12,11 @@ Codex 飞书桥接是一个由单一 owner 在 Windows 本机运行的 OpenAI Co
 
 - **按项目和任务组织话题：**项目活动后按需创建私有项目群，每个 Codex 任务对应一个飞书话题。
 - **可靠出站：**SQLite 持久 outbox、稳定 UUID、重试分类、投递对账、死信和熔断器。
-- **双向消息镜像：**Codex 中由 owner 输入的文本、图片和文件标签同步到对应飞书话题；飞书注入 Codex 的同一用户 item 按持久 `thread + turn + item` 身份抑制回流，不会重复提交或重复显示。
+- **双向消息镜像：**Codex 中由 owner 输入的文本、图片和文件标签同步到对应飞书话题。文本可通过官方 `lark-cli` 以已授权的飞书 owner 身份发出；启动时强制核对 CLI 用户 Open ID 与 `owner_open_id`，不一致即拒绝启用。桥接器按飞书消息 ancestry 抑制代发回调，并覆盖发送与接收的竞态窗口，代发内容不会重新进入 Codex 成为新指令。回退为机器人发送时会使用配置的 owner 显示名明确标注用户发言。飞书注入 Codex 的同一用户 item 按持久 `thread + turn + item` 身份抑制回流，不会重复提交或重复显示。
 - **适合手机阅读：**同步过程消息和 final；发送项目内 Markdown 图片及 Codex 可见图像；文件引用只显示 `🔗【文件名】`，不暴露本地路径；普通链接只显示可读标签。
 - **严格入站路由：**派发前核对 owner、tenant、app、群、话题根、回复后代、任务 epoch、项目根目录和能力授权。
-- **远程输入：**文本、图片和文件分别授权。默认桌面投递路径先定位精确任务，再通过 Codex 应用自身的辅助功能输入面提交，桌面始终是唯一写入者。附件受大小与格式限制，校验并哈希后写入选定项目的 inbox，不自动执行或解压。
-- **真实提交状态：**Codex 桌面输入器确认提交后，飞书显示“已提交 Codex”；如 steer 需要等待当前工具边界，桥接器会在精确 rollout user item 稍后出现时完成认领。桌面输入结果本身不明确时才保持未确认状态，不虚构人类式“已读”。
+- **远程输入：**文本、图片和文件分别授权。推荐的 CLI 路径恢复精确任务，并核验已经持久化的 rollout 用户回合。若 Codex 桌面正在持有该任务的写入锁，消息会持久排队，待写入锁释放后重试。附件受大小与格式限制，校验并哈希后写入选定项目的 inbox，不自动执行或解压。
+- **真实提交状态：**只有核验到精确的 Codex 用户回合后，飞书才显示“已提交 Codex”；任务忙碌时只显示一条稳定的排队状态，结果不明确时保持未确认。飞书消息后的空心圈属于客户端原生已读状态，桥接器和普通飞书开放接口都不能将它消除。
 - **精确去重：**来源去重不依赖正文相同；rollout item、dispatch 记录、provider outbox 和飞书 UUID 共同保证重启及重试后的至多一次可见投递。
 - **远程审批和控制：**短时、单次审批动作，以及受约束的状态、任务、profile、append、stop 和 hard-stop 命令。
 - **Windows 身份隔离：**飞书凭据只属于 Broker 身份；Codex App Server 可通过另一个非管理员 worker 身份运行，并使用 ACL 与 Job Object 建立边界。
@@ -42,7 +42,7 @@ Codex Desktop 状态 / rollout 文件
 身份/群/root/epoch/能力核对
       |
       v
-Codex 桌面辅助功能 -> 桌面持有的写入者 -> 精确任务
+Codex CLI resume -> 持久化用户回合 -> 精确任务
 ```
 
 桥接器只在本机运行，不开放公共 webhook，也不扫描任意项目目录。项目和任务身份来自已配置的 Codex 状态，所有可写项目根目录仍必须在 allowlist 内。
@@ -52,6 +52,7 @@ Codex 桌面辅助功能 -> 桌面持有的写入者 -> 精确任务
 - Windows 10/11 或 Windows Server，具备 PowerShell 和任务计划程序
 - Python 3.11 或更高版本
 - 已安装的 Codex CLI/App Server 可执行文件
+- 如需以本人身份同步 Codex 用户发言：安装飞书官方 `lark-cli` 并完成对应账号授权；安装引导会检测该依赖，并依次提示安装、配置、登录和验证
 - 已创建并发布的飞书自建应用和机器人，以及租户管理员批准的所需权限
 - 使用 Windows 凭据管理器保存飞书 App Secret
 - 使用 `delivery = "desktop"` 时保持 Codex 桌面处于已登录的交互会话
@@ -94,7 +95,7 @@ python -m codex_feishu_bridge verify-config --config config/offline.example.toml
    python -m codex_feishu_bridge run --config .runtime/runtime.toml
    ```
 
-远程文本、图片、文件、审批和控制是五个独立开关，只有明确配置后才会启用。飞书消息需要出现在 Codex 桌面任务时使用 `delivery = "desktop"`；App Server 兼容模式仍要求独立 Windows worker 身份。
+远程文本、图片、文件、审批和控制是五个独立开关，只有明确配置后才会启用。推荐使用 `delivery = "cli"`：它通过 `codex exec resume` 把飞书文字和图片直接写入指定 Codex 任务，不依赖桌面窗口焦点。Codex 每个任务只允许一个写入者；桌面回合正在运行时，飞书输入会保留在队列中，等写入锁释放后再提交。`desktop` 保留为显式选择的 UI 自动化方案，App Server 兼容模式仍要求独立 Windows worker 身份。
 
 ## 目录说明
 
@@ -125,6 +126,14 @@ codex plugin marketplace add huangzhimin4read/CodexFeishu --ref main; if ($LASTE
 ```
 
 安装后新建一个 Codex 任务，使插件被加载。插件安装的是 Codex 管理工作流；桥接服务本身仍需按照下文完成仓库部署，并配置私有飞书凭据。
+
+Broker 安装程序默认会进入飞书 CLI 安装与授权引导（只有明确不启用本人身份同步时才使用 `-SkipLarkCliSetup` 跳过）。同一引导也可单独运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_lark_cli.ps1 -Profile codex-feishu-owner
+```
+
+它只安装官方 `@larksuite/cli`，并调用 `config init --new`、`auth login --recommend` 与 `auth status --json --verify`。OAuth 令牌由飞书 CLI 在本机管理，不写入本仓库。若跳过该步骤，机器人通知仍可使用，但不能以飞书本人身份同步 Codex 中的用户发言。
 
 插件本身不包含凭据、租户 ID、真实运行配置或运行数据库。
 

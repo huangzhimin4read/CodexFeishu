@@ -79,6 +79,22 @@ def test_runtime_config_is_versioned_and_has_distinct_databases(tmp_path: Path) 
     assert config.mode is RuntimeMode.OUTBOUND
     assert config.database_path != config.shadow_database_path
     assert config.feishu is not None and config.feishu.credential_target == "CodexFeishu/app"
+    assert config.feishu.owner_display_name == "用户"
+
+
+def test_runtime_config_accepts_owner_display_name(tmp_path: Path) -> None:
+    executable = tmp_path / "codex.exe"
+    executable.write_bytes(b"fixture")
+    path = _write_config(tmp_path, executable)
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            'owner_open_id="owner"',
+            'owner_open_id="owner"\nowner_display_name="项目所有者"',
+        ),
+        encoding="utf-8",
+    )
+    config = load_runtime_config(path)
+    assert config.feishu is not None and config.feishu.owner_display_name == "项目所有者"
 
 
 def test_runtime_config_rejects_unknown_and_plaintext_secret_fields(tmp_path: Path) -> None:
@@ -232,4 +248,27 @@ def test_desktop_remote_delivery_uses_the_codex_app_writer_without_worker(tmp_pa
     config = load_runtime_config(path)
     assert config.remote.delivery is RemoteDeliveryMode.DESKTOP
     assert config.remote.uses_desktop
+    assert config.worker_isolation is None
+
+
+def test_cli_remote_delivery_uses_persisted_codex_writer_without_worker(tmp_path: Path) -> None:
+    executable = tmp_path / "codex.exe"
+    executable.write_bytes(b"fixture")
+    path = _write_config(tmp_path, executable)
+    text = path.read_text(encoding="utf-8").replace(
+        'p2p_chat_id="chat"',
+        'p2p_chat_id="chat"\nconversation_mode="topic_group"\ntopic_chat_id="topic-chat"',
+    )
+    text += (
+        '\n[codex_projects]\nenabled=true\nactivity_after_ms=1234567890\n'
+        'primary_project_id="project-1"\n'
+        '\n[remote]\nenabled=true\ntext=true\nimages=true\nfiles=true\n'
+        'approvals=true\ncontrols=true\nauto_approve=true\ndelivery="cli"\n'
+    )
+    path.write_text(text, encoding="utf-8")
+    config = load_runtime_config(path)
+    assert config.remote.delivery is RemoteDeliveryMode.CLI
+    assert config.remote.uses_cli
+    assert config.remote.uses_host_writer
+    assert not config.remote.uses_desktop
     assert config.worker_isolation is None

@@ -31,10 +31,12 @@ files = false
 approvals = false
 controls = false
 auto_approve = false
-# "desktop" routes input through the Codex app's own writer and confirms the
-# resulting user turn from newly appended rollout bytes. "app_server" is the
+# "cli" (recommended) persists text and images into the exact Codex task with
+# `codex exec resume`, then confirms the new user turn from rollout bytes. If
+# the desktop task owns an active writer, input stays queued until it is idle.
+# "desktop" is an explicit UI-automation alternative. "app_server" is the
 # isolated-worker compatibility mode.
-delivery = "desktop"
+delivery = "cli"
 max_image_bytes = 10485760
 max_file_bytes = 26214400
 
@@ -52,6 +54,11 @@ max_file_bytes = 26214400
 tenant_key = "REPLACE_TENANT_KEY"
 app_id = "REPLACE_APP_ID"
 owner_open_id = "REPLACE_OWNER_OPEN_ID"
+owner_display_name = "REPLACE_OWNER_DISPLAY_NAME"
+# Optional: send Codex-authored user messages through official lark-cli UAT.
+# Startup verifies that the profile's authorized user Open ID equals owner_open_id.
+#user_message_identity = "lark_cli_user"
+#lark_cli_profile = "REPLACE_LARK_CLI_PROFILE"
 p2p_chat_id = "REPLACE_FALLBACK_P2P_CHAT_ID"
 conversation_mode = "topic_group"
 topic_chat_id = "REPLACE_PRIVATE_TOPIC_GROUP_CHAT_ID"

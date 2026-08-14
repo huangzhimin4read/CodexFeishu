@@ -136,6 +136,12 @@ class IngressRouter:
         with self.storage.immediate() as connection:
             if not self._chat_is_authorized(connection, chat_id):
                 raise IngressRejected("event chat is not an active Codex project group")
+            outbound = connection.execute(
+                "SELECT source FROM message_ancestry WHERE message_id=?",
+                (message_id,),
+            ).fetchone()
+            if outbound is not None and outbound["source"] == "outbound":
+                return IngressDecision(True, "outbound_echo", None, None, None)
             existing = connection.execute(
                 "SELECT chat_id,content_hash FROM ingress_messages WHERE tenant_key=? AND app_id=? AND message_id=?",
                 (tenant, app_id, message_id),
@@ -177,11 +183,24 @@ class IngressRouter:
                 target, routing_state = self._route(
                     connection, chat_id, root_id, parent_id, provider_thread_id, sequence
                 )
+            pending_user_echo = False
+            if target is not None and root_id is not None and parent_id is not None:
+                canonical_text_body = json.dumps(
+                    {"text": text}, ensure_ascii=False, separators=(",", ":")
+                )
+                pending_user_echo = connection.execute(
+                    "SELECT 1 FROM provider_outbox WHERE operation='user_message' "
+                    "AND message_type='text' AND state IN ('pending','leased','retryable','unknown') "
+                    "AND thread_id=? AND target_message_id IN (?,?) AND body_json=? "
+                    "AND julianday(created_at)>=julianday('now','-2 minutes') LIMIT 1",
+                    (target, root_id, parent_id, canonical_text_body),
+                ).fetchone() is not None
             connection.execute(
                 "INSERT INTO ingress_messages(tenant_key,app_id,message_id,event_id,chat_id,sender_open_id,"
                 "chat_type,root_id,parent_id,provider_thread_id,message_type,content_hash,raw_hash,received_at,ingest_seq,"
-                "routing_state,target_thread_id,binding_epoch,identity_binding_epoch) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "routing_state,target_thread_id,binding_epoch,identity_binding_epoch,dispatch_not_before) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,"
+                "CASE WHEN ? THEN datetime('now','+2 seconds') ELSE NULL END)",
                 (
                     tenant,
                     app_id,
@@ -202,6 +221,7 @@ class IngressRouter:
                     target,
                     sequence["active_binding_epoch"],
                     self._identity_epoch(connection),
+                    int(pending_user_echo),
                 ),
             )
             connection.execute(
@@ -248,6 +268,23 @@ class IngressRouter:
                 (utc_now(),),
             )
         return IngressDecision(False, routing_state, target, ingest_seq, command)
+
+    def suppress_if_outbound_echo(self, message_id: str) -> bool:
+        """Reconcile a provider callback that raced outbound confirmation."""
+
+        with self.storage.immediate() as connection:
+            outbound = connection.execute(
+                "SELECT 1 FROM message_ancestry WHERE message_id=? AND source='outbound'",
+                (message_id,),
+            ).fetchone()
+            if outbound is None:
+                return False
+            connection.execute(
+                "UPDATE ingress_messages SET routing_state='outbound_echo',"
+                "last_dispatch_error=NULL WHERE message_id=?",
+                (message_id,),
+            )
+            return True
 
     def _route(
         self,

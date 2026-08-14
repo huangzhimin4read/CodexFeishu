@@ -49,6 +49,14 @@ python -m codex_feishu_bridge preflight --config .runtime/live-remote.toml --liv
 
 If the private live config is absent, run the public test and compile checks and state that live preflight was not performed. Also scan tracked changes for credentials, real tenant identifiers, and local absolute paths in public documentation.
 
+When owner-identity mirroring is requested, run the repository's guided prerequisite step:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/setup_lark_cli.ps1 -Profile codex-feishu-owner
+```
+
+It must use the official `@larksuite/cli` package and guide the user through `config init --new`, `auth login --recommend`, and `auth status --json --verify`. Never collect or print the OAuth token. If the user skips this optional step, keep bot notifications available and leave owner-identity mirroring disabled.
+
 ## Deploy or restart
 
 Only deploy or restart when the user requested repair, deployment, installation, or a change that requires activation.
@@ -71,14 +79,19 @@ Use a new unique message for each direction and report evidence, not just UI imp
 For Feishu to Codex, require:
 
 - A new ingress row for the Feishu message.
-- An accepted desktop-dispatch record containing the target Codex task, turn ID, and user-item ID.
-- The same user item visible in the Codex task reader or rollout record.
+- An accepted dispatch record containing the exact target Codex task and turn ID.
+- With `delivery = "cli"`, a new `task_started -> turn_context -> user message` sequence whose exact body and image wrappers match the ingress; CLI user records intentionally have no stable user-item ID.
+- The same user text and images visible in the Codex task reader or rollout record.
 
 For Codex to Feishu, require:
 
 - A normalized Codex `user_message` item.
 - Exactly one confirmed provider-outbox delivery for that item.
 - No desktop-dispatch record for a Codex-origin user item.
+
+When `user_message_identity = "lark_cli_user"`, require the configured CLI profile to verify as a ready user whose Open ID exactly equals `owner_open_id` before starting the service. Text should then appear as that Feishu user. Do not silently use a differently authorized CLI account. Permanent CLI authorization/configuration errors may fall back to a bot message labeled with `owner_display_name`; retryable or unknown results must remain queued to avoid duplicates.
+
+Also verify that the Feishu event emitted by a successful user-identity send is classified as `outbound_echo` and never creates a desktop dispatch. Cover the callback-before-confirmation race with a short delayed reconciliation against the exact pending user-message body, task, and reply target. An independently authored later message with identical text must still route normally.
 
 For a message injected from Feishu, verify the exact return item is suppressed by `task + turn + user item` identity. Do not deduplicate by body text: an independently authored identical message must still deliver.
 
@@ -88,6 +101,8 @@ For a message injected from Feishu, verify the exact return item is suppressed b
 - Keep one Feishu topic per Codex task and use the visible task name plus project name; omit internal task IDs, hashes, citation XML, and local file paths.
 - Render links and file citations as path-free visible labels. Upload accessible local images/files instead of exposing their paths.
 - Keep remote text, images, files, approvals, and control commands behind the configured owner-only authorization and audit policy.
+- Prefer `delivery = "cli"` for Feishu input. It persists through `codex exec resume` and attaches local images with `--image`. Codex allows one writer per task: if the desktop currently owns an active turn, retain the ingress message and retry after the task is idle; never claim submission or fall back to an unconfirmed UI click. Use `desktop` only as an explicitly selected UI-automation mode.
+- Treat Feishu's hollow circle as native read-status UI. The normal Feishu API and `lark-cli` cannot mark an owner-authored incoming message read on behalf of Codex, so do not claim to clear it or synthesize a read receipt.
 - Do not confuse content-level approval messages with Codex permission prompts. Actual prompts for desktop-owned turns follow that Codex task's permission profile.
 - Do not claim delivery merely because Feishu accepted an event or the bridge accepted a queue item. Distinguish submitted to Codex, visible in Codex, sent to Feishu, and confirmed by Feishu.
 

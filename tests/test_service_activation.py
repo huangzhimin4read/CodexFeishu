@@ -1,9 +1,11 @@
+import base64
 from pathlib import Path
 from types import SimpleNamespace
 
 from codex_feishu_bridge.codex.rollout_observer import IncrementalRolloutReader
 from codex_feishu_bridge.codex.state_discovery import RolloutSource
-from codex_feishu_bridge.codex.controller import DispatchResult
+from codex_feishu_bridge.codex.controller import DispatchBusy, DispatchResult
+from codex_feishu_bridge.feishu.client import ProviderOutcome, ResourceDownloadResult
 from codex_feishu_bridge.runtime_storage import RuntimeStorage
 from codex_feishu_bridge.service import (
     BridgeService,
@@ -12,6 +14,7 @@ from codex_feishu_bridge.service import (
 )
 from codex_feishu_bridge.runtime_config import RuntimeMode
 from codex_feishu_bridge.runtime_config import ConversationMode, FeishuBinding
+from codex_feishu_bridge.runtime_storage import utc_now
 
 
 SESSION = b'{"type":"session_meta","payload":{"rollout_version":"1","id":"t"}}\n'
@@ -52,6 +55,78 @@ def test_activation_checkpoint_does_not_replay_existing_visible_records(tmp_path
             handle.write(FINAL)
         batch = reader.read(rollout, cursor, expected_thread_id="t")
         assert [event.text for event in batch.events] == ["after activation"]
+
+
+def test_pending_iso_timestamp_image_is_downloaded_and_materialized(
+    tmp_path: Path,
+) -> None:
+    png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zyz8AAAAASUVORK5CYII="
+    )
+
+    class Client:
+        calls = 0
+
+        @classmethod
+        def download_message_resource(cls, **kwargs):
+            cls.calls += 1
+            return ResourceDownloadResult(
+                ProviderOutcome.CONFIRMED,
+                "0",
+                content=png,
+                content_type="image/png",
+            )
+
+    with RuntimeStorage(tmp_path / "runtime.db") as storage:
+        storage.initialize_runtime(sink_mode="control")
+        storage.connection.execute(
+            "INSERT INTO task_bindings(thread_id,project_root,chat_id,anchor_message_id,anchor_state,"
+            "anchor_uuid,anchor_marker,opted_in,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            ("thread", str(tmp_path), "chat", "anchor", "confirmed", "uuid", "marker", 1, utc_now()),
+        )
+        storage.connection.execute(
+            "INSERT INTO ingress_messages(tenant_key,app_id,message_id,chat_id,sender_open_id,"
+            "chat_type,message_type,content_hash,raw_hash,received_at,ingest_seq,routing_state,"
+            "target_thread_id) VALUES('tenant','app','image-message','chat','owner','group',"
+            "'image','content','raw',?,1,'routed_reply','thread')",
+            (utc_now(),),
+        )
+        storage.connection.execute(
+            "INSERT INTO ingress_payloads(message_id,text,created_at,expires_at) "
+            "VALUES('image-message','',?,datetime('now','+1 day'))",
+            (utc_now(),),
+        )
+        storage.connection.execute(
+            "INSERT INTO ingress_attachments(message_id,resource_key,resource_type,state,"
+            "next_attempt_at,created_at,updated_at) "
+            "VALUES('image-message','image-key','image','pending',?,?,?)",
+            ("2026-01-01T00:00:00Z", utc_now(), utc_now()),
+        )
+        service = object.__new__(BridgeService)
+        service.storage = storage
+        service.config = SimpleNamespace(
+            remote=SimpleNamespace(max_image_bytes=1024 * 1024, max_file_bytes=1024 * 1024)
+        )
+        service.client = Client()
+        row = storage.connection.execute(
+            "SELECT i.*,p.text FROM ingress_messages i "
+            "JOIN ingress_payloads p ON p.message_id=i.message_id "
+            "WHERE i.message_id='image-message'"
+        ).fetchone()
+
+        input_items, capability, prompt = service._prepare_ingress_input(row)
+
+        assert Client.calls == 1
+        assert capability == "image"
+        assert "飞书发送了这张图片" in prompt
+        assert input_items is not None and input_items[1]["type"] == "localImage"
+        assert Path(input_items[1]["path"]).is_file()
+        attachment = storage.connection.execute(
+            "SELECT state,content_hash,local_path FROM ingress_attachments "
+            "WHERE message_id='image-message'"
+        ).fetchone()
+        assert attachment["state"] == "materialized"
+        assert attachment["content_hash"] and attachment["local_path"]
 
 
 def test_database_fence_is_reclaimed_after_mutex_proves_old_instance_is_gone(
@@ -315,7 +390,9 @@ def test_desktop_ingress_uses_desktop_writer_and_only_then_queues_submitted(
             ),
             remote=SimpleNamespace(uses_desktop=True),
         )
-        service.ingress = object()
+        service.ingress = SimpleNamespace(
+            suppress_if_outbound_echo=lambda _message_id: False
+        )
         service.controller = object()
         service.client = object()
         service.desktop_dispatcher = RecordingDesktopDispatcher()
@@ -341,6 +418,119 @@ def test_desktop_ingress_uses_desktop_writer_and_only_then_queues_submitted(
         assert service._active_rollout_turns == {
             "thread": frozenset({"desktop-turn"})
         }
+
+
+def test_cli_ingress_uses_cli_writer_and_only_then_queues_submitted(tmp_path: Path) -> None:
+    class RecordingCliDispatcher:
+        calls: list[dict] = []
+
+        def dispatch(self, **kwargs):
+            self.calls.append(kwargs)
+            return DispatchResult("attempt", "cli-turn", "accepted")
+
+    contract = tmp_path / "contract.json"
+    contract.write_text("{}", encoding="utf-8")
+    with RuntimeStorage(tmp_path / "runtime.db") as storage:
+        storage.initialize_runtime(sink_mode="control")
+        storage.connection.execute(
+            "INSERT INTO ingress_messages(tenant_key,app_id,message_id,chat_id,sender_open_id,"
+            "chat_type,message_type,content_hash,raw_hash,received_at,ingest_seq,routing_state,"
+            "target_thread_id) VALUES('tenant','app','incoming-cli','topic-chat','owner','group',"
+            "'text','content','raw',datetime('now'),1,'routed_current','thread')"
+        )
+        storage.connection.execute(
+            "INSERT INTO ingress_payloads(message_id,text,created_at,expires_at) "
+            "VALUES('incoming-cli','来自飞书的 CLI 输入',datetime('now'),datetime('now','+1 day'))"
+        )
+        service = object.__new__(BridgeService)
+        service.storage = storage
+        service.config = SimpleNamespace(
+            feishu=FeishuBinding(
+                "tenant", "app", "owner", "fallback", "target", contract,
+                ConversationMode.TOPIC_GROUP, "topic-chat",
+            ),
+            remote=SimpleNamespace(uses_cli=True, uses_desktop=False),
+        )
+        service.ingress = SimpleNamespace(suppress_if_outbound_echo=lambda _message_id: False)
+        service.controller = object()
+        service.client = object()
+        service.cli_dispatcher = RecordingCliDispatcher()
+        service._active_rollout_turns = {}
+
+        service._process_ingress()
+
+        assert service.cli_dispatcher.calls == [{
+            "ingress_message_id": "incoming-cli",
+            "thread_id": "thread",
+            "text": "来自飞书的 CLI 输入",
+            "required_capability": "text",
+            "image_paths": (),
+        }]
+        acknowledgement = storage.connection.execute(
+            "SELECT body_json FROM provider_outbox "
+            "WHERE logical_message_id='submitted-ack:incoming-cli'"
+        ).fetchone()
+        assert acknowledgement is not None and "已提交 Codex" in acknowledgement["body_json"]
+        assert service._active_rollout_turns == {"thread": frozenset({"cli-turn"})}
+
+
+def test_cli_active_writer_conflict_is_retained_and_queued_once(tmp_path: Path) -> None:
+    class BusyCliDispatcher:
+        calls = 0
+
+        def dispatch(self, **kwargs):
+            self.calls += 1
+            raise DispatchBusy("active writer")
+
+    contract = tmp_path / "contract.json"
+    contract.write_text("{}", encoding="utf-8")
+    with RuntimeStorage(tmp_path / "runtime.db") as storage:
+        storage.initialize_runtime(sink_mode="control")
+        storage.connection.execute(
+            "INSERT INTO ingress_messages(tenant_key,app_id,message_id,chat_id,sender_open_id,"
+            "chat_type,message_type,content_hash,raw_hash,received_at,ingest_seq,routing_state,"
+            "target_thread_id) VALUES('tenant','app','incoming-busy','topic-chat','owner','group',"
+            "'text','content','raw',datetime('now'),1,'routed_current','thread')"
+        )
+        storage.connection.execute(
+            "INSERT INTO ingress_payloads(message_id,text,created_at,expires_at) "
+            "VALUES('incoming-busy','正在处理时的输入',datetime('now'),datetime('now','+1 day'))"
+        )
+        service = object.__new__(BridgeService)
+        service.storage = storage
+        service.config = SimpleNamespace(
+            feishu=FeishuBinding(
+                "tenant", "app", "owner", "fallback", "target", contract,
+                ConversationMode.TOPIC_GROUP, "topic-chat",
+            ),
+            remote=SimpleNamespace(uses_cli=True, uses_desktop=False),
+        )
+        service.ingress = SimpleNamespace(suppress_if_outbound_echo=lambda _message_id: False)
+        service.controller = object()
+        service.client = object()
+        service.cli_dispatcher = BusyCliDispatcher()
+        service._active_rollout_turns = {}
+
+        service._process_ingress()
+
+        assert service.cli_dispatcher.calls == 1
+        row = storage.connection.execute(
+            "SELECT routing_state,dispatch_not_before,dispatch_attempt_count,last_dispatch_error "
+            "FROM ingress_messages WHERE message_id='incoming-busy'"
+        ).fetchone()
+        assert row is not None
+        assert row["routing_state"] == "routed_current"
+        assert row["dispatch_not_before"] is not None
+        assert row["dispatch_attempt_count"] == 1
+        assert row["last_dispatch_error"] == "thread_busy"
+        assert storage.connection.execute(
+            "SELECT COUNT(*) FROM provider_outbox "
+            "WHERE logical_message_id='pending-ack:incoming-busy'"
+        ).fetchone()[0] == 1
+        assert storage.connection.execute(
+            "SELECT COUNT(*) FROM provider_outbox "
+            "WHERE logical_message_id='submitted-ack:incoming-busy'"
+        ).fetchone()[0] == 0
 
 
 def test_unconfirmed_desktop_dispatch_does_not_claim_retry_or_submission(

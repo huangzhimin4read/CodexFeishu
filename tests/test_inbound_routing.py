@@ -97,6 +97,83 @@ def test_reply_control_is_persisted_as_known_ancestry(tmp_path: Path) -> None:
         assert tuple(ancestry) == ("anchor", "anchor", "thread", "chat")
 
 
+def test_known_outbound_user_message_is_not_dispatched_back_to_codex(tmp_path: Path) -> None:
+    with RuntimeStorage(tmp_path / "db.sqlite") as storage:
+        storage.initialize_runtime(sink_mode="control")
+        prepare(storage)
+        storage.connection.execute(
+            "INSERT OR REPLACE INTO message_ancestry(message_id,root_id,parent_id,thread_id,chat_id,source,created_at) "
+            "VALUES('user-reply','anchor','anchor','thread','chat','outbound',?)",
+            (utc_now(),),
+        )
+        decision = IngressRouter(storage, binding(tmp_path)).ingest(
+            event("user-reply", "Codex 原生用户输入", root="anchor", parent="anchor")
+        )
+        assert decision.duplicate
+        assert decision.routing_state == "outbound_echo"
+        assert storage.connection.execute(
+            "SELECT COUNT(*) FROM ingress_messages WHERE message_id='user-reply'"
+        ).fetchone()[0] == 0
+
+
+def test_pending_user_send_delays_callback_for_ancestry_reconciliation(
+    tmp_path: Path,
+) -> None:
+    with RuntimeStorage(tmp_path / "db.sqlite") as storage:
+        storage.initialize_runtime(sink_mode="control")
+        prepare(storage)
+        body = json.dumps(
+            {"text": "Codex 原生用户输入"}, ensure_ascii=False, separators=(",", ":")
+        )
+        outbox_id = storage.enqueue_provider_message(
+            logical_message_id="user-message",
+            thread_id="thread",
+            operation="user_message",
+            endpoint_name="reply_message",
+            target_message_id="anchor",
+            stable_uuid="stable-user-message",
+            marker="marker",
+            body_json=body,
+            body_hash="hash",
+            priority=10,
+        )
+        storage.connection.execute(
+            "UPDATE provider_outbox SET state='leased',lease_owner='worker' WHERE outbox_id=?",
+            (outbox_id,),
+        )
+        router = IngressRouter(storage, binding(tmp_path))
+        router.ingest(
+            event("racing-reply", "Codex 原生用户输入", root="anchor", parent="anchor")
+        )
+        delayed = storage.connection.execute(
+            "SELECT dispatch_not_before FROM ingress_messages WHERE message_id='racing-reply'"
+        ).fetchone()
+        assert delayed["dispatch_not_before"] is not None
+
+        storage.connection.execute(
+            "INSERT OR REPLACE INTO message_ancestry(message_id,root_id,parent_id,thread_id,chat_id,source,created_at) "
+            "VALUES('racing-reply','anchor','anchor','thread','chat','outbound',?)",
+            (utc_now(),),
+        )
+        assert router.suppress_if_outbound_echo("racing-reply")
+        assert storage.connection.execute(
+            "SELECT routing_state FROM ingress_messages WHERE message_id='racing-reply'"
+        ).fetchone()[0] == "outbound_echo"
+
+        storage.connection.execute(
+            "UPDATE provider_outbox SET state='confirmed',provider_message_id='racing-reply' "
+            "WHERE outbox_id=?",
+            (outbox_id,),
+        )
+        router.ingest(
+            event("human-same-text", "Codex 原生用户输入", root="anchor", parent="anchor")
+        )
+        independent = storage.connection.execute(
+            "SELECT dispatch_not_before FROM ingress_messages WHERE message_id='human-same-text'"
+        ).fetchone()
+        assert independent["dispatch_not_before"] is None
+
+
 def test_conflict_and_indeterminate_reply_fail_closed(tmp_path: Path) -> None:
     with RuntimeStorage(tmp_path / "db.sqlite") as storage:
         storage.initialize_runtime(sink_mode="control")

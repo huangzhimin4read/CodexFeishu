@@ -126,6 +126,29 @@ def test_plain_confirmation_rejects_extra_blank_line_or_body_change() -> None:
     )
 
 
+def test_plain_confirmation_accepts_codex_ambient_browser_wrapper() -> None:
+    actual = (
+        '\n<in-app-browser-context source="ambient-ui-state">\n'
+        "This block is automatically supplied ambient UI state.\n"
+        "</in-app-browser-context>\n\n"
+        "## My request:\n"
+        "桌面输入\n"
+    )
+    assert DesktopCodexDispatcher._matches_submitted_text(
+        actual,
+        "桌面输入",
+        has_attachments=False,
+    )
+
+
+def test_plain_confirmation_rejects_arbitrary_request_wrapper() -> None:
+    assert not DesktopCodexDispatcher._matches_submitted_text(
+        "untrusted preamble\n## My request:\n桌面输入\n",
+        "桌面输入",
+        has_attachments=False,
+    )
+
+
 def test_desktop_dispatch_reports_ui_submission_while_rollout_confirmation_is_pending(
     tmp_path: Path,
 ) -> None:

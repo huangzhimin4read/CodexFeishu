@@ -5,7 +5,10 @@ param(
     [string]$InstallRoot = 'C:\ProgramData\CodexFeishuBridge',
     [string]$PythonPath = 'python.exe',
     [string]$ConfigPath = '',
-    [string]$RuntimeRoot = ''
+    [string]$RuntimeRoot = '',
+    [string]$LarkCliProfile = 'codex-feishu-owner',
+    [switch]$SkipLarkCliSetup,
+    [switch]$RequireUserIdentity
 )
 
 $ErrorActionPreference = 'Stop'
@@ -34,12 +37,25 @@ $brokerRoot = Join-Path $installPath 'broker'
 $runnerSource = Join-Path $workspacePath 'scripts\run_supervised_remote_service.ps1'
 $runner = Join-Path $brokerRoot 'run_supervised_remote_service.ps1'
 $applicationRoot = Join-Path $installPath 'app'
+$larkCliSetup = Join-Path $workspacePath 'scripts\setup_lark_cli.ps1'
 $resultPath = Join-Path ([System.IO.Path]::GetFullPath($RuntimeRoot)) 'broker-autorestart-install.json'
 $xmlPath = Join-Path ([System.IO.Path]::GetFullPath($RuntimeRoot)) 'broker-autorestart-task.xml'
 
 foreach ($required in @($runnerSource, $PythonPath, $ConfigPath, $applicationRoot)) {
     if (-not (Test-Path -LiteralPath $required)) {
         throw "Required path is missing: $required"
+    }
+}
+
+if (-not $SkipLarkCliSetup) {
+    if (-not (Test-Path -LiteralPath $larkCliSetup)) {
+        throw "Required Feishu CLI setup guide is missing: $larkCliSetup"
+    }
+    Write-Host '正在进入飞书 CLI 安装与账号授权引导。若只使用机器人通知，可以在引导中跳过。'
+    if ($RequireUserIdentity) {
+        & $larkCliSetup -Profile $LarkCliProfile -RequireUserIdentity
+    } else {
+        & $larkCliSetup -Profile $LarkCliProfile
     }
 }
 
@@ -115,6 +131,8 @@ $result = [ordered]@{
     runner_path = $runner
     runner_sha256 = $installedHash
     broker_sid = $brokerSid
+    lark_cli_setup = if ($SkipLarkCliSetup) { 'skipped' } else { 'guided' }
+    lark_cli_profile = if ($SkipLarkCliSetup) { $null } else { $LarkCliProfile }
 }
 [System.IO.File]::WriteAllText(
     $resultPath,

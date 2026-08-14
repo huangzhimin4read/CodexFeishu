@@ -49,6 +49,15 @@ class SendReconciler:
         ).fetchone()
         if binding is None:
             return ReconciliationResult("delivery_indeterminate", None, 0)
+        expected_user_open_id: str | None = None
+        if row["operation"] == "user_message":
+            identity = self.storage.connection.execute(
+                "SELECT owner_open_id FROM identity_bindings "
+                "WHERE binding_key='owner' AND state='active'"
+            ).fetchone()
+            if identity is None:
+                return ReconciliationResult("delivery_indeterminate", None, 0)
+            expected_user_open_id = str(identity["owner_open_id"])
         page_token: str | None = None
         matches: list[str] = []
         while True:
@@ -73,7 +82,10 @@ class SendReconciler:
                 sender = item.get("sender")
                 sender_type = sender.get("sender_type") if isinstance(sender, dict) else None
                 sender_id = sender.get("id") if isinstance(sender, dict) else None
-                if sender_type not in {"app", "bot"} or sender_id != self.client.app_id:
+                if row["operation"] == "user_message":
+                    if sender_type != "user" or sender_id != expected_user_open_id:
+                        continue
+                elif sender_type not in {"app", "bot"} or sender_id != self.client.app_id:
                     continue
                 expected_type = (
                     "interactive" if row["operation"] == "approval" else row["message_type"]

@@ -420,17 +420,39 @@ function Find-ButtonByName {
     return [CodexDesktopNative]::FindAccessible($Renderer, 43, $Names, 10000)
 }
 
+function Test-AccessibleActionable {
+    param($Accessible)
+    if (-not $Accessible) {
+        return $false
+    }
+    $state = Get-AccessibleProperty $Accessible 'state'
+    if ($null -eq $state) {
+        return $false
+    }
+    # MSAA STATE_SYSTEM_UNAVAILABLE, INVISIBLE, and OFFSCREEN.  The Codex
+    # attachment composer exposes its Send button before the pasted image has
+    # finished staging, but marks it unavailable.  Invoking the default action
+    # at that point is a no-op and must not be reported as a submission.
+    $blockedStates = 0x00000001 -bor 0x00008000 -bor 0x00010000
+    return (([int]$state -band $blockedStates) -eq 0)
+}
+
+function Find-DraftAttachmentRemoveButton {
+    param($Renderer)
+    return [CodexDesktopNative]::FindAccessibleByPrefix(
+        $Renderer,
+        43,
+        @(
+            (Decode-Utf8Base64 '56e76Zmk4oCc'),
+            'Remove "',
+            'Remove '),
+        10000)
+}
+
 function Remove-DraftAttachments {
     param($Renderer, [int]$MaxAttachments = 20)
     for ($index = 0; $index -lt $MaxAttachments; $index++) {
-        $remove = [CodexDesktopNative]::FindAccessibleByPrefix(
-            $Renderer,
-            43,
-            @(
-                (Decode-Utf8Base64 '56e76Zmk4oCc'),
-                'Remove "',
-                'Remove '),
-            10000)
+        $remove = Find-DraftAttachmentRemoveButton $Renderer
         if (-not $remove) {
             return
         }
@@ -476,7 +498,13 @@ function Copy-ClipboardDataObject {
 }
 
 function Attach-Files {
-    param($Renderer, [IntPtr]$WindowHandle, [string[]]$Paths)
+    param(
+        $Renderer,
+        [IntPtr]$WindowHandle,
+        [int]$ProcessId,
+        [string[]]$Paths,
+        [datetime]$Deadline
+    )
     if ($Paths.Count -eq 0) {
         return
     }
@@ -502,7 +530,20 @@ function Attach-Files {
         $composer.accSelect(1, 0)
         Start-Sleep -Milliseconds 100
         [CodexDesktopNative]::SendPaste()
-        Start-Sleep -Milliseconds 800
+        # Pasting a file only queues attachment staging.  Do not continue until
+        # the attachment is represented in the draft; otherwise the following
+        # Send action can submit text alone or do nothing while upload is busy.
+        $attachmentReady = $false
+        while ((Get-Date) -lt $Deadline -and -not $attachmentReady) {
+            Start-Sleep -Milliseconds 100
+            $surface = Find-CodexRenderer -ProcessId $ProcessId
+            if ($surface) {
+                $attachmentReady = $null -ne (Find-DraftAttachmentRemoveButton $surface.Renderer)
+            }
+        }
+        if (-not $attachmentReady) {
+            throw 'Codex did not finish staging the draft attachment before timeout.'
+        }
     }
     finally {
         if ([CodexDesktopNative]::GetClipboardSequenceNumber() -eq $attachmentClipboardSequence) {
@@ -603,19 +644,33 @@ try {
         $result.ok = $true
     }
     else {
-        Attach-Files -Renderer $surface.Renderer -WindowHandle $surface.WindowHandle -Paths $attachments
+        Attach-Files -Renderer $surface.Renderer -WindowHandle $surface.WindowHandle -ProcessId $process.Id -Paths $attachments -Deadline $deadline
         Set-AccessibleValue $composer $text
         if ($Action -eq 'draft') {
             $result.ok = $true
         }
         else {
-            Start-Sleep -Milliseconds 150
-            $surface = Find-CodexRenderer -ProcessId $process.Id
-            $send = Find-ButtonByName $surface.Renderer @((Decode-Utf8Base64 '5Y+R6YCB'), 'Send')
+            $send = $null
+            while ((Get-Date) -lt $deadline -and -not $send) {
+                Start-Sleep -Milliseconds 100
+                $surface = Find-CodexRenderer -ProcessId $process.Id
+                if (-not $surface) {
+                    continue
+                }
+                $candidate = Find-ButtonByName $surface.Renderer @(
+                    (Decode-Utf8Base64 '5Y+R6YCB'),
+                    'Send')
+                if (Test-AccessibleActionable $candidate) {
+                    $send = $candidate
+                }
+            }
             if ($send) {
                 $send.accDoDefaultAction(0)
             }
             else {
+                if ($attachments.Count -gt 0) {
+                    throw 'Codex Send control did not become available for the staged attachment.'
+                }
                 $composer = Find-Composer $surface.Renderer
                 $composer.accSelect(1, 0)
                 if (-not [CodexDesktopNative]::ForceForeground($surface.WindowHandle)) {
