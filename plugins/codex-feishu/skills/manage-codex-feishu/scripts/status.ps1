@@ -46,9 +46,14 @@ Add-Check $checks "service_pid" $pidAlive $(if ($pidAlive) { "alive" } elseif ($
 
 $healthPath = Join-Path $root ".runtime\topic-group-status.json"
 $health = $null
+$healthGeneratedAtText = $null
 if (Test-Path -LiteralPath $healthPath -PathType Leaf) {
     try {
-        $health = Get-Content -LiteralPath $healthPath -Raw -Encoding utf8 | ConvertFrom-Json
+        $healthJson = Get-Content -LiteralPath $healthPath -Raw -Encoding utf8
+        $health = $healthJson | ConvertFrom-Json
+        if ($healthJson -match '"generated_at"\s*:\s*"([^"]+)"') {
+            $healthGeneratedAtText = $Matches[1]
+        }
     } catch {
         $health = $null
     }
@@ -56,9 +61,15 @@ if (Test-Path -LiteralPath $healthPath -PathType Leaf) {
 Add-Check $checks "health_file" ($null -ne $health) $(if ($null -eq $health) { "missing_or_invalid" } else { "valid" })
 
 $healthAge = $null
-if ($null -ne $health -and $null -ne $health.generated_at) {
+if ($null -ne $health -and -not [string]::IsNullOrWhiteSpace($healthGeneratedAtText)) {
     try {
-        $generatedAt = [DateTimeOffset]::Parse([string]$health.generated_at)
+        # ConvertFrom-Json may eagerly coerce ISO timestamps to a local DateTime
+        # and discard the original UTC marker. Parse the exact JSON token instead.
+        $generatedAt = [DateTimeOffset]::Parse(
+            $healthGeneratedAtText,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::RoundtripKind
+        )
         $healthAge = [math]::Max(0, [int]([DateTimeOffset]::UtcNow - $generatedAt).TotalSeconds)
     } catch {
         $healthAge = $null

@@ -626,6 +626,16 @@ class RuntimeStorage(BridgeStorage):
         self.ensure_writable_sink()
         now = utc_now()
         with self.transaction() as connection:
+            # A worker can exit after acquiring a lease but before recording the
+            # provider result. Treat an expired lease as an unknown send outcome,
+            # never as a fresh retry: reconciliation will first search provider
+            # history or reuse the same UUID while its idempotency window is open.
+            connection.execute(
+                "UPDATE provider_outbox SET state='unknown',lease_owner=NULL,"
+                "lease_expires_at=NULL,last_error_code='lease_expired',updated_at=? "
+                "WHERE state='leased' AND lease_expires_at IS NOT NULL AND lease_expires_at<=?",
+                (now, now),
+            )
             row = connection.execute(
                 "SELECT * FROM provider_outbox WHERE "
                 "state IN ('pending','retryable') AND next_attempt_at<=? "

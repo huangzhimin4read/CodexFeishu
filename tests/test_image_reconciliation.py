@@ -214,6 +214,53 @@ def test_unknown_text_rejects_same_body_from_another_application(tmp_path) -> No
         assert result == result.__class__("delivery_indeterminate", None, 0)
 
 
+def test_disabled_history_endpoint_persists_indeterminate_state(tmp_path) -> None:
+    class Contract:
+        @staticmethod
+        def endpoint(name: str, *, require_enabled: bool = True):
+            if name == "reply_message":
+                return SimpleNamespace(uuid_window_seconds=1, enabled=True)
+            if name == "list_messages":
+                return SimpleNamespace(uuid_window_seconds=None, enabled=False)
+            raise AssertionError(name)
+
+    class Client:
+        app_id = "app"
+        contract = Contract()
+
+    with RuntimeStorage(tmp_path / "runtime.db") as storage:
+        storage.initialize_runtime(sink_mode="outbound")
+        outbox_id = storage.enqueue_provider_message(
+            logical_message_id="history-disabled",
+            operation="commentary",
+            endpoint_name="reply_message",
+            stable_uuid="stable-disabled",
+            marker="marker",
+            body_json='{"text":"unknown"}',
+            body_hash="hash",
+            priority=1,
+        )
+        old = (datetime.now(UTC) - timedelta(seconds=10)).isoformat().replace(
+            "+00:00", "Z"
+        )
+        storage.connection.execute(
+            "UPDATE provider_outbox SET state='unknown',first_attempt_at=? WHERE outbox_id=?",
+            (old, outbox_id),
+        )
+
+        result = SendReconciler(storage, Client()).reconcile(outbox_id)
+
+        assert result == result.__class__("delivery_indeterminate", None, 0)
+        row = storage.connection.execute(
+            "SELECT state,last_error_code FROM provider_outbox WHERE outbox_id=?",
+            (outbox_id,),
+        ).fetchone()
+        assert tuple(row) == (
+            "delivery_indeterminate",
+            "reconciliation_endpoint_disabled",
+        )
+
+
 def test_unknown_user_message_reconciles_only_from_configured_owner(tmp_path) -> None:
     body_json = json.dumps(
         {"text": "用户身份消息"}, ensure_ascii=False, separators=(",", ":")

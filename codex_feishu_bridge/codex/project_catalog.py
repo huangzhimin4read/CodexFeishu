@@ -101,7 +101,7 @@ class CodexProjectCatalog:
             connection = sqlite3.connect(uri, uri=True, timeout=2.0)
             connection.row_factory = sqlite3.Row
             rows = connection.execute(
-                "SELECT id,rollout_path,cwd,updated_at_ms FROM threads "
+                "SELECT id,rollout_path,cwd,title,updated_at_ms FROM threads "
                 "WHERE archived=0 AND thread_source='user' "
                 "AND updated_at_ms>=? ORDER BY updated_at_ms,id",
                 (activity_after_ms,),
@@ -126,12 +126,19 @@ class CodexProjectCatalog:
             if project is None:
                 raise DiscoveryError("active task references a non-current Codex project")
             cwd = _normalized_path(str(row["cwd"]))
+            # Current Codex Desktop persists only projectKind/projectId for
+            # local task assignments.  Older builds also duplicated the task
+            # path as cwd/path.  The SQLite task index and rollout session
+            # metadata remain independent path authorities below; validate a
+            # legacy duplicate when it is present, but do not require it.
             assigned_cwd = assignment.get("cwd")
             assigned_path = assignment.get("path")
-            if not isinstance(assigned_cwd, str):
-                raise DiscoveryError("active task assignment lacks a local cwd")
-            if cwd != _normalized_path(assigned_cwd):
+            if assigned_cwd is not None and not isinstance(assigned_cwd, str):
+                raise DiscoveryError("active task assignment cwd is invalid")
+            if isinstance(assigned_cwd, str) and cwd != _normalized_path(assigned_cwd):
                 raise DiscoveryError("active task paths disagree")
+            if assigned_path is not None and not isinstance(assigned_path, str):
+                raise DiscoveryError("active task assignment path is invalid")
             if isinstance(assigned_path, str) and cwd != _normalized_path(assigned_path):
                 raise DiscoveryError("active task path and cwd disagree")
             if not _inside(cwd, project.root_paths):
@@ -147,6 +154,8 @@ class CodexProjectCatalog:
             if _normalized_path(metadata_cwd) != cwd:
                 raise DiscoveryError("active task rollout cwd does not match the index")
             version = str(metadata.get("rollout_version", metadata.get("version", "1")))
+            raw_title = row["title"]
+            task_title = raw_title.strip() if isinstance(raw_title, str) and raw_title.strip() else None
             stat = rollout_path.stat()
             found.append(
                 RolloutSource(
@@ -158,6 +167,7 @@ class CodexProjectCatalog:
                     project_id=project_id,
                     project_name=project.display_name,
                     activity_ms=int(row["updated_at_ms"]),
+                    task_title=task_title,
                 )
             )
         return tuple(found)

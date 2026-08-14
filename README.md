@@ -1,8 +1,8 @@
-# Codex Feishu Bridge
+# Codex Feishu / Lark Bridge
 
 [简体中文](README.zh-CN.md) | English
 
-Codex Feishu Bridge is an owner-operated, Windows-local bridge between OpenAI Codex and Feishu (Lark). It mirrors Codex task output into private Feishu topic groups and can, behind explicit capability gates, route owner messages, images, files, approvals, and control commands back to the exact Codex task.
+Codex Feishu / Lark Bridge is an owner-operated, Windows-local bridge between OpenAI Codex and Feishu (Lark). It mirrors Codex task output into private Feishu/Lark topic groups and can, behind explicit capability gates, route owner messages, images, files, approvals, and control commands back to the exact Codex task.
 
 The project is designed around a fail-closed control plane. Unknown identities, chats, reply ancestry, task bindings, provider delivery results, executable versions, schemas, and approval outcomes are rejected or held for reconciliation instead of being guessed.
 
@@ -15,8 +15,8 @@ The project is designed around a fail-closed control plane. Unknown identities, 
 - **Bidirectional message mirroring:** owner-authored Codex text, images, and path-free file labels are mirrored to the matching Feishu topic. Text can be sent as the authorized Feishu owner through the official `lark-cli`; startup fails closed unless that CLI user's Open ID exactly matches `owner_open_id`. Provider-message ancestry suppresses the resulting Feishu callback, including the send/receive race window, so the mirror cannot re-enter Codex as a new instruction. Bot fallback is visibly labeled with the configured owner display name. The exact user item injected from Feishu is suppressed on its return path using durable `thread + turn + item` identity, so it is neither resubmitted nor displayed twice.
 - **Readable mobile output:** process/final messages, project-local Markdown images, visible Codex image outputs, file-citation labels, and link destinations hidden from provider-visible text.
 - **Strict inbound routing:** owner, tenant, app, chat, topic root, ancestry, task epoch, project root, and capability binding are checked before dispatch.
-- **Remote inputs:** independently gated text, image, and file input. The recommended CLI path resumes the exact task and verifies the persisted rollout user turn. If Codex Desktop currently owns that task's writer, input remains durably queued and retries after the writer is released. Files are bounded, hashed, stored under the selected project's inbox, and never auto-executed or auto-extracted.
-- **Truthful submission status:** Feishu reports `submitted` only after the exact Codex user turn is confirmed. Busy tasks show one stable queued status; ambiguous outcomes remain unconfirmed. Feishu's hollow read-status circle is native client UI and cannot be cleared by the bridge or the normal Feishu API.
+- **Remote inputs:** independently gated text, image, and file input. The recommended path tries Codex CLI first. If Codex Desktop already owns the task writer, the bridge submits through that existing desktop writer and still requires the exact persisted rollout turn and user-item ID before reporting success. Files are bounded, hashed, stored under the selected project's inbox, and never auto-executed or auto-extracted.
+- **Truthful submission status:** Feishu/Lark reports `submitted` only after the exact Codex user turn is confirmed. If neither writer can be verified, the message remains queued or unconfirmed instead of being claimed as delivered. Feishu's hollow read-status circle is native client UI and cannot be cleared by the bridge or the normal Feishu API.
 - **Exact de-duplication:** source de-duplication never depends on equal message bodies. Rollout item identity, dispatch records, provider outbox identity, and Feishu UUIDs preserve at-most-once visible delivery across retries and restarts.
 - **Approvals and controls:** short-lived single-use approval actions plus scoped status, task, profile, append, stop, and hard-stop commands.
 - **Windows isolation:** provider credentials stay with the broker identity; Codex App Server work can run through a separate non-administrator worker identity with ACL and Job Object boundaries.
@@ -95,7 +95,7 @@ For a real local configuration:
    python -m codex_feishu_bridge run --config .runtime/runtime.toml
    ```
 
-Remote text, images, files, approvals, and controls are separate booleans and remain disabled until explicitly configured. Prefer `delivery = "cli"`: it uses `codex exec resume` to persist Feishu text and images into the exact Codex task without relying on desktop focus. Codex permits one writer per task, so input received during an active desktop turn stays queued and retries after the turn releases the writer. `desktop` remains an explicit UI-automation alternative, while the App Server compatibility path still requires a separately principalled worker.
+Remote text, images, files, approvals, and controls are separate booleans and remain disabled until explicitly configured. Prefer `delivery = "cli"`: it uses `codex exec resume` for an unowned task. When Codex Desktop already owns the task writer, only that exact active-writer conflict falls back to the desktop composer; the bridge then verifies the persisted rollout turn and user-item ID before acknowledgement. `desktop` remains an explicit UI-automation mode, while the App Server compatibility path still requires a separately principalled worker.
 
 ## Repository layout
 

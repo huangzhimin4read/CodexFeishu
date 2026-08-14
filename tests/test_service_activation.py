@@ -424,6 +424,10 @@ def test_cli_ingress_uses_cli_writer_and_only_then_queues_submitted(tmp_path: Pa
     class RecordingCliDispatcher:
         calls: list[dict] = []
 
+        @staticmethod
+        def recover_abandoned_prestarts():
+            return (0, 0)
+
         def dispatch(self, **kwargs):
             self.calls.append(kwargs)
             return DispatchResult("attempt", "cli-turn", "accepted")
@@ -474,13 +478,24 @@ def test_cli_ingress_uses_cli_writer_and_only_then_queues_submitted(tmp_path: Pa
         assert service._active_rollout_turns == {"thread": frozenset({"cli-turn"})}
 
 
-def test_cli_active_writer_conflict_is_retained_and_queued_once(tmp_path: Path) -> None:
+def test_cli_active_writer_conflict_uses_verified_desktop_writer(tmp_path: Path) -> None:
     class BusyCliDispatcher:
         calls = 0
+
+        @staticmethod
+        def recover_abandoned_prestarts():
+            return (0, 0)
 
         def dispatch(self, **kwargs):
             self.calls += 1
             raise DispatchBusy("active writer")
+
+    class RecordingDesktopDispatcher:
+        calls: list[dict] = []
+
+        def dispatch(self, **kwargs):
+            self.calls.append(kwargs)
+            return DispatchResult("attempt", "desktop-turn", "accepted")
 
     contract = tmp_path / "contract.json"
     contract.write_text("{}", encoding="utf-8")
@@ -509,27 +524,26 @@ def test_cli_active_writer_conflict_is_retained_and_queued_once(tmp_path: Path) 
         service.controller = object()
         service.client = object()
         service.cli_dispatcher = BusyCliDispatcher()
+        service.desktop_dispatcher = RecordingDesktopDispatcher()
         service._active_rollout_turns = {}
 
         service._process_ingress()
 
         assert service.cli_dispatcher.calls == 1
-        row = storage.connection.execute(
-            "SELECT routing_state,dispatch_not_before,dispatch_attempt_count,last_dispatch_error "
-            "FROM ingress_messages WHERE message_id='incoming-busy'"
-        ).fetchone()
-        assert row is not None
-        assert row["routing_state"] == "routed_current"
-        assert row["dispatch_not_before"] is not None
-        assert row["dispatch_attempt_count"] == 1
-        assert row["last_dispatch_error"] == "thread_busy"
-        assert storage.connection.execute(
-            "SELECT COUNT(*) FROM provider_outbox "
-            "WHERE logical_message_id='pending-ack:incoming-busy'"
-        ).fetchone()[0] == 1
+        assert service.desktop_dispatcher.calls == [{
+            "ingress_message_id": "incoming-busy",
+            "thread_id": "thread",
+            "text": "正在处理时的输入",
+            "required_capability": "text",
+            "attachment_paths": (),
+        }]
         assert storage.connection.execute(
             "SELECT COUNT(*) FROM provider_outbox "
             "WHERE logical_message_id='submitted-ack:incoming-busy'"
+        ).fetchone()[0] == 1
+        assert storage.connection.execute(
+            "SELECT COUNT(*) FROM provider_outbox "
+            "WHERE logical_message_id='pending-ack:incoming-busy'"
         ).fetchone()[0] == 0
 
 

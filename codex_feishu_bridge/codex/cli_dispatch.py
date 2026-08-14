@@ -8,6 +8,7 @@ import time
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -121,6 +122,7 @@ class CodexCliDispatcher:
         thread_id: str,
         expected_hash: str,
         has_images: bool,
+        not_before: datetime | None = None,
     ) -> _RecordedCliUserMessage | None:
         current = self._rollout_snapshots(thread_id)
         for path, size in current.items():
@@ -163,10 +165,119 @@ class CodexCliDispatcher:
                     expected_hash,
                     has_images=has_images,
                 ):
+                    if not_before is not None:
+                        timestamp = record.get("timestamp")
+                        if not isinstance(timestamp, str):
+                            continue
+                        try:
+                            recorded_at = datetime.fromisoformat(
+                                timestamp.replace("Z", "+00:00")
+                            )
+                        except ValueError:
+                            continue
+                        if recorded_at < not_before:
+                            continue
                     item_id = self._item_id(record, payload)
                     if item_id is not None:
                         return _RecordedCliUserMessage(turn_id, item_id)
         return None
+
+    def recover_abandoned_prestarts(self, *, older_than_seconds: float = 120.0) -> tuple[int, int]:
+        """Reconcile or roll back CLI writes abandoned before ``thread.started``.
+
+        ``request_id='codex-cli'`` means this service never observed the CLI's
+        start acknowledgement. A durable exact rollout item wins; otherwise an
+        old pre-start record is removed so the same ingress can use the current
+        writer. The creation-time bound prevents matching unrelated older text.
+        """
+
+        cutoff = datetime.now(UTC) - timedelta(seconds=older_than_seconds)
+        rows = self.storage.connection.execute(
+            "SELECT dispatch_attempt_id,ingress_message_id,thread_id,request_hash,"
+            "submitted_text_hash,has_attachments,created_at FROM dispatch_records "
+            "WHERE state='bytes_sending' AND request_id='codex-cli' "
+            "AND submitted_text_hash IS NOT NULL AND updated_at<=? "
+            "ORDER BY created_at LIMIT 20",
+            (cutoff.isoformat().replace("+00:00", "Z"),),
+        ).fetchall()
+        accepted_count = 0
+        retry_count = 0
+        for row in rows:
+            try:
+                created_at = datetime.fromisoformat(
+                    str(row["created_at"]).replace("Z", "+00:00")
+                ) - timedelta(seconds=2)
+            except ValueError:
+                continue
+            recorded = self._find_new_user_turn(
+                {},
+                thread_id=str(row["thread_id"]),
+                expected_hash=str(row["submitted_text_hash"]),
+                has_images=bool(row["has_attachments"]),
+                not_before=created_at,
+            )
+            with self.storage.immediate() as connection:
+                if recorded is not None:
+                    updated = connection.execute(
+                        "UPDATE dispatch_records SET state='accepted',request_id='codex-cli-started',"
+                        "turn_id=?,user_item_id=?,updated_at=? WHERE dispatch_attempt_id=? "
+                        "AND state='bytes_sending' AND request_id='codex-cli'",
+                        (
+                            recorded.turn_id,
+                            recorded.item_id,
+                            utc_now(),
+                            row["dispatch_attempt_id"],
+                        ),
+                    )
+                    if updated.rowcount != 1:
+                        continue
+                    response_hash = sha256(
+                        canonicalize(
+                            {
+                                "threadId": row["thread_id"],
+                                "turnId": recorded.turn_id,
+                                "itemId": recorded.item_id,
+                                "writer": "codex-cli-recovered",
+                            }
+                        )
+                    ).hexdigest()
+                    connection.execute(
+                        "UPDATE dispatch_attempts SET state='accepted',response_hash=?,updated_at=? "
+                        "WHERE dispatch_attempt_id=? AND state='dispatching'",
+                        (response_hash, utc_now(), row["dispatch_attempt_id"]),
+                    )
+                    connection.execute(
+                        "INSERT OR IGNORE INTO executed_command_tombstones(tombstone_key,content_hash,"
+                        "target_thread_id,dispatch_attempt_id,retain_until) "
+                        "VALUES(?,?,?,?,datetime('now','+365 days'))",
+                        (
+                            row["ingress_message_id"],
+                            row["request_hash"],
+                            row["thread_id"],
+                            row["dispatch_attempt_id"],
+                        ),
+                    )
+                    accepted_count += 1
+                    continue
+                removed = connection.execute(
+                    "DELETE FROM dispatch_records WHERE dispatch_attempt_id=? "
+                    "AND state='bytes_sending' AND request_id='codex-cli'",
+                    (row["dispatch_attempt_id"],),
+                )
+                if removed.rowcount != 1:
+                    continue
+                connection.execute(
+                    "DELETE FROM dispatch_attempts WHERE dispatch_attempt_id=? "
+                    "AND state='dispatching'",
+                    (row["dispatch_attempt_id"],),
+                )
+                connection.execute(
+                    "UPDATE ingress_messages SET dispatch_not_before=NULL,"
+                    "last_dispatch_error='cli_prestart_recovered' WHERE message_id=?",
+                    (row["ingress_message_id"],),
+                )
+                retry_count += 1
+        return accepted_count, retry_count
 
     def _wait_for_new_user_turn(
         self,

@@ -1,7 +1,7 @@
 {
   "name": "codex-feishu",
-  "version": "0.1.0+codex.20260814124046",
-  "description": "Operate and verify the owner-only Windows bridge between Codex desktop tasks and Feishu topics.",
+  "version": "0.1.0+codex.20260814161658",
+  "description": "Operate and verify the owner-only Windows bridge between Codex desktop tasks and Feishu/Lark topics.",
   "author": {
     "name": "Huang Zhimin",
     "url": "https://github.com/huangzhimin4read"
@@ -18,9 +18,9 @@
   ],
   "skills": "./skills/",
   "interface": {
-    "displayName": "Codex Feishu",
-    "shortDescription": "Manage the local Codex and Feishu task bridge.",
-    "longDescription": "Provides guarded workflows for installing, checking, testing, deploying, restarting, and diagnosing the owner-only Codex Feishu bridge. The always-on bridge remains a Windows scheduled service so Feishu input can enter the exact Codex desktop task even when no plugin tool is running.",
+    "displayName": "Codex Feishu / Lark",
+    "shortDescription": "Manage the local Codex and Feishu/Lark task bridge.",
+    "longDescription": "Provides guarded workflows for installing, checking, testing, deploying, restarting, and diagnosing the owner-only Codex Feishu/Lark bridge. The always-on bridge remains a Windows scheduled service so Feishu/Lark input can enter the exact Codex desktop task even when no plugin tool is running.",
     "developerName": "Huang Zhimin",
     "category": "Productivity",
     "capabilities": [

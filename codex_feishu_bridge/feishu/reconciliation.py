@@ -24,6 +24,17 @@ class SendReconciler:
         self.storage = storage
         self.client = client
 
+    def _mark_indeterminate(
+        self, outbox_id: int, *, matches: int, reason: str
+    ) -> ReconciliationResult:
+        now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        self.storage.connection.execute(
+            "UPDATE provider_outbox SET state='delivery_indeterminate',last_error_code=?,"
+            "updated_at=? WHERE outbox_id=? AND state='unknown'",
+            (reason, now, outbox_id),
+        )
+        return ReconciliationResult("delivery_indeterminate", None, matches)
+
     def reconcile(self, outbox_id: int) -> ReconciliationResult:
         row = self.storage.connection.execute(
             "SELECT * FROM provider_outbox WHERE outbox_id=? AND state='unknown'", (outbox_id,)
@@ -43,12 +54,16 @@ class SendReconciler:
             return ReconciliationResult("retry_with_same_uuid", None, 0)
         endpoint = self.client.contract.endpoint("list_messages", require_enabled=False)
         if not endpoint.enabled:
-            return ReconciliationResult("delivery_indeterminate", None, 0)
+            return self._mark_indeterminate(
+                outbox_id, matches=0, reason="reconciliation_endpoint_disabled"
+            )
         binding = self.storage.connection.execute(
             "SELECT chat_id FROM task_bindings WHERE thread_id=?", (row["thread_id"],)
         ).fetchone()
         if binding is None:
-            return ReconciliationResult("delivery_indeterminate", None, 0)
+            return self._mark_indeterminate(
+                outbox_id, matches=0, reason="reconciliation_binding_missing"
+            )
         expected_user_open_id: str | None = None
         if row["operation"] == "user_message":
             identity = self.storage.connection.execute(
@@ -56,7 +71,9 @@ class SendReconciler:
                 "WHERE binding_key='owner' AND state='active'"
             ).fetchone()
             if identity is None:
-                return ReconciliationResult("delivery_indeterminate", None, 0)
+                return self._mark_indeterminate(
+                    outbox_id, matches=0, reason="reconciliation_identity_missing"
+                )
             expected_user_open_id = str(identity["owner_open_id"])
         page_token: str | None = None
         matches: list[str] = []
@@ -72,10 +89,18 @@ class SendReconciler:
                 query["page_token"] = page_token
             response = self.client.call("list_messages", query=query, chat_id=binding["chat_id"])
             if response.outcome is not ProviderOutcome.CONFIRMED or not response.response:
-                return ReconciliationResult("delivery_indeterminate", None, len(matches))
+                return self._mark_indeterminate(
+                    outbox_id,
+                    matches=len(matches),
+                    reason="reconciliation_provider_unavailable",
+                )
             data = response.response.get("data")
             if not isinstance(data, dict) or not isinstance(data.get("items", []), list):
-                return ReconciliationResult("delivery_indeterminate", None, len(matches))
+                return self._mark_indeterminate(
+                    outbox_id,
+                    matches=len(matches),
+                    reason="reconciliation_invalid_response",
+                )
             for item in data.get("items", []):
                 if not isinstance(item, dict):
                     continue
@@ -109,7 +134,11 @@ class SendReconciler:
             if not has_more:
                 break
             if not isinstance(next_token, str) or not next_token or next_token == page_token:
-                return ReconciliationResult("delivery_indeterminate", None, len(matches))
+                return self._mark_indeterminate(
+                    outbox_id,
+                    matches=len(matches),
+                    reason="reconciliation_invalid_page_token",
+                )
             page_token = next_token
         if len(matches) == 1:
             self.storage.connection.execute(
@@ -118,9 +147,8 @@ class SendReconciler:
                 (matches[0], datetime.now(UTC).isoformat().replace("+00:00", "Z"), outbox_id),
             )
             return ReconciliationResult("confirmed", matches[0], 1)
-        self.storage.connection.execute(
-            "UPDATE provider_outbox SET state='delivery_indeterminate',updated_at=? "
-            "WHERE outbox_id=? AND state='unknown'",
-            (datetime.now(UTC).isoformat().replace("+00:00", "Z"), outbox_id),
+        return self._mark_indeterminate(
+            outbox_id,
+            matches=len(matches),
+            reason="reconciliation_no_unique_match",
         )
-        return ReconciliationResult("delivery_indeterminate", None, len(matches))

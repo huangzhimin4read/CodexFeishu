@@ -201,6 +201,101 @@ def test_cli_dispatch_requires_stable_user_item_identity(tmp_path: Path) -> None
         assert tuple(record) == ("outcome_unknown", None, None)
 
 
+def _abandoned_prestart(storage: RuntimeStorage, *, text: str) -> None:
+    storage.connection.execute(
+        "INSERT INTO ingress_messages(tenant_key,app_id,message_id,chat_id,sender_open_id,chat_type,"
+        "message_type,content_hash,raw_hash,received_at,routing_state,target_thread_id) "
+        "VALUES('tenant','app','abandoned','chat','owner','group','text','content','raw',"
+        "'2000-01-01T00:00:00Z','routed_current',?)",
+        (THREAD_ID,),
+    )
+    storage.connection.execute(
+        "INSERT INTO dispatch_attempts(dispatch_attempt_id,state,updated_at) "
+        "VALUES('abandoned-attempt','dispatching','2000-01-01T00:00:00Z')"
+    )
+    storage.connection.execute(
+        "INSERT INTO dispatch_records(dispatch_attempt_id,ingress_message_id,thread_id,"
+        "client_user_message_id,profile_hash,binding_epoch,identity_binding_epoch,fencing_token,"
+        "server_epoch,connection_epoch,request_hash,request_id,submitted_text_hash,has_attachments,"
+        "state,created_at,updated_at) VALUES('abandoned-attempt','abandoned',?,'client','cli',1,1,1,"
+        "'server','connection','request','codex-cli',?,0,'bytes_sending',"
+        "'2000-01-01T00:00:00Z','2000-01-01T00:00:00Z')",
+        (THREAD_ID, desktop_submission_text_hash(text)),
+    )
+
+
+def test_abandoned_cli_prestart_without_rollout_is_released_for_retry(tmp_path: Path) -> None:
+    codex_home = tmp_path / "codex-home"
+    (codex_home / "sessions").mkdir(parents=True)
+    with RuntimeStorage(tmp_path / "runtime.db") as storage:
+        storage.initialize_runtime(sink_mode="control")
+        _task_binding(storage, tmp_path)
+        _abandoned_prestart(storage, text="未落盘")
+        result = _dispatcher(
+            storage, RecordingGateway(codex_home / "unused.jsonl"), codex_home
+        ).recover_abandoned_prestarts(older_than_seconds=0)
+        assert result == (0, 1)
+        assert storage.connection.execute(
+            "SELECT COUNT(*) FROM dispatch_records"
+        ).fetchone()[0] == 0
+        ingress = storage.connection.execute(
+            "SELECT dispatch_not_before,last_dispatch_error FROM ingress_messages "
+            "WHERE message_id='abandoned'"
+        ).fetchone()
+        assert tuple(ingress) == (None, "cli_prestart_recovered")
+
+
+def test_abandoned_cli_prestart_claims_exact_persisted_user_item(tmp_path: Path) -> None:
+    codex_home = tmp_path / "codex-home"
+    session_dir = codex_home / "sessions"
+    session_dir.mkdir(parents=True)
+    rollout = session_dir / f"rollout-test-{THREAD_ID}.jsonl"
+    records = [
+        {
+            "timestamp": "2000-01-01T00:00:01Z",
+            "type": "event_msg",
+            "payload": {"type": "task_started", "turn_id": TURN_ID},
+        },
+        {
+            "timestamp": "2000-01-01T00:00:02Z",
+            "type": "turn_context",
+            "payload": {"turn_id": TURN_ID},
+        },
+        {
+            "timestamp": "2000-01-01T00:00:03Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "id": "recovered-item",
+                "content": [{"type": "input_text", "text": "已落盘"}],
+                "internal_chat_message_metadata_passthrough": {"turn_id": TURN_ID},
+            },
+        },
+    ]
+    rollout.write_text(
+        "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records),
+        encoding="utf-8",
+    )
+    with RuntimeStorage(tmp_path / "runtime.db") as storage:
+        storage.initialize_runtime(sink_mode="control")
+        _task_binding(storage, tmp_path)
+        _abandoned_prestart(storage, text="已落盘")
+        result = _dispatcher(
+            storage, RecordingGateway(rollout), codex_home
+        ).recover_abandoned_prestarts(older_than_seconds=0)
+        assert result == (1, 0)
+        record = storage.connection.execute(
+            "SELECT state,request_id,turn_id,user_item_id FROM dispatch_records"
+        ).fetchone()
+        assert tuple(record) == (
+            "accepted",
+            "codex-cli-started",
+            TURN_ID,
+            "recovered-item",
+        )
+
+
 def test_cli_active_writer_failure_rolls_back_only_prepared_attempt(
     tmp_path: Path,
 ) -> None:

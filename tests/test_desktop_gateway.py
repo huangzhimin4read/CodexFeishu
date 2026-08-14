@@ -77,3 +77,19 @@ def test_gateway_rejects_noncanonical_thread_and_helper_failure(tmp_path: Path) 
         gateway.submit("not-a-thread", "text")
     with pytest.raises(DesktopGatewayError, match="composer unavailable"):
         gateway.submit(THREAD_ID, "text")
+
+
+def test_desktop_helper_uses_focused_enter_after_send_readiness() -> None:
+    script = (
+        Path(__file__).resolve().parents[1]
+        / "codex_feishu_bridge"
+        / "windows"
+        / "codex_desktop_input.ps1"
+    ).read_text(encoding="utf-8")
+
+    assert "$send.accDoDefaultAction" not in script
+    assert "Test-AccessibleActionable $candidate" in script
+    assert "Clipboard]::SetText" in script
+    assert "[CodexDesktopNative]::SendPaste()" in script
+    assert "Set-AccessibleValue $composer $text" not in script
+    assert "[CodexDesktopNative]::SendEnter()" in script

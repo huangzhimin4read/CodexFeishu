@@ -1,9 +1,9 @@
 ---
 name: manage-codex-feishu
-description: Operate, verify, deploy, restart, or diagnose the owner-only Windows bridge between Codex desktop tasks and Feishu topics. Use for CodexFeishu service health, Feishu-to-Codex delivery, Codex-to-Feishu mirroring, exact return-path deduplication, topic routing, attachments, receipts, remote commands, or scheduled-task recovery.
+description: Operate, verify, deploy, restart, or diagnose the owner-only Windows bridge between Codex desktop tasks and Feishu/Lark topics. Use for CodexFeishu service health, Feishu-to-Codex delivery, Codex-to-Feishu mirroring, exact return-path deduplication, topic routing, attachments, receipts, remote commands, or scheduled-task recovery.
 ---
 
-# Manage Codex Feishu
+# Manage Codex Feishu / Lark
 
 Operate the always-on CodexFeishu bridge conservatively and verify delivery from durable evidence. Keep the Windows scheduled service as the message transport; this skill is its management surface, not a replacement daemon.
 
@@ -101,7 +101,7 @@ For a message injected from Feishu, verify the exact return item is suppressed b
 - Keep one Feishu topic per Codex task and use the visible task name plus project name; omit internal task IDs, hashes, citation XML, and local file paths.
 - Render links and file citations as path-free visible labels. Upload accessible local images/files instead of exposing their paths.
 - Keep remote text, images, files, approvals, and control commands behind the configured owner-only authorization and audit policy.
-- Prefer `delivery = "cli"` for Feishu input. It persists through `codex exec resume` and attaches local images with `--image`. Codex allows one writer per task: if the desktop currently owns an active turn, retain the ingress message and retry after the task is idle; never claim submission or fall back to an unconfirmed UI click. Use `desktop` only as an explicitly selected UI-automation mode.
+- Prefer `delivery = "cli"` for Feishu/Lark input. It persists through `codex exec resume` and attaches local images with `--image`. Codex allows one writer per task: only an exact CLI active-writer conflict may use the existing desktop writer. The desktop click alone is never acceptance; require the exact new rollout turn and stable user-item ID, otherwise leave the result unconfirmed. Use `desktop` as an explicitly selected UI-automation mode only when requested.
 - Treat Feishu's hollow circle as native read-status UI. The normal Feishu API and `lark-cli` cannot mark an owner-authored incoming message read on behalf of Codex, so do not claim to clear it or synthesize a read receipt.
 - Do not confuse content-level approval messages with Codex permission prompts. Actual prompts for desktop-owned turns follow that Codex task's permission profile.
 - Do not claim delivery merely because Feishu accepted an event or the bridge accepted a queue item. Distinguish submitted to Codex, visible in Codex, sent to Feishu, and confirmed by Feishu.

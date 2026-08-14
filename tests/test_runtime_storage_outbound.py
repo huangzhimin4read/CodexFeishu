@@ -86,6 +86,29 @@ def test_rollout_items_outbox_and_cursor_commit_atomically(tmp_path: Path) -> No
         assert second["operation"] == "final"
 
 
+def test_expired_outbox_lease_becomes_unknown_before_any_retry(tmp_path: Path) -> None:
+    with RuntimeStorage(tmp_path / "runtime.db") as storage:
+        storage.initialize_runtime(sink_mode="control")
+        now = utc_now()
+        storage.connection.execute(
+            "INSERT INTO provider_outbox(logical_message_id,thread_id,turn_id,item_id,operation,"
+            "message_type,endpoint_name,target_message_id,reply_in_thread,stable_uuid,marker,body_json,"
+            "body_hash,priority,state,next_attempt_at,created_at,updated_at) "
+            "VALUES('expired','thread','turn','item','commentary','text','reply_message','anchor',1,"
+            "'uuid','marker','{}','hash',100,'pending',?,?,?)",
+            (now, now, now),
+        )
+        leased = storage.lease_outbox("dead-worker", "2000-01-01T00:00:00Z")
+        assert leased is not None and leased["state"] == "leased"
+
+        assert storage.lease_outbox("new-worker", "2999-01-01T00:00:00Z") is None
+        recovered = storage.connection.execute(
+            "SELECT state,lease_owner,lease_expires_at,last_error_code FROM provider_outbox "
+            "WHERE logical_message_id='expired'"
+        ).fetchone()
+        assert tuple(recovered) == ("unknown", None, None, "lease_expired")
+
+
 def test_codex_user_message_is_mirrored_once_but_exact_feishu_return_is_suppressed(
     tmp_path: Path,
 ) -> None:

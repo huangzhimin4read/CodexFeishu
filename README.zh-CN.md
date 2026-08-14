@@ -1,8 +1,8 @@
-# Codex 飞书桥接
+# Codex 飞书（Lark）桥接
 
 简体中文 | [English](README.md)
 
-Codex 飞书桥接是一个由单一 owner 在 Windows 本机运行的 OpenAI Codex 与飞书连接服务。它可以把 Codex 任务输出同步到飞书私有项目群的话题中；在逐项显式授权后，也可以把 owner 从飞书发送的文本、图片、文件、审批操作和控制命令准确送回对应的 Codex 任务。
+Codex 飞书（Lark）桥接是一个由单一 owner 在 Windows 本机运行的 OpenAI Codex 与飞书（Lark）连接服务。它可以把 Codex 任务输出同步到飞书/Lark 私有项目群的话题中；在逐项显式授权后，也可以把 owner 从飞书发送的文本、图片、文件、审批操作和控制命令准确送回对应的 Codex 任务。
 
 项目采用 fail-closed 控制面：身份、群、回复树、任务绑定、消息投递结果、Codex 可执行文件、协议 schema 或审批结果只要不能确定，就拒绝、暂停或进入对账，不自行猜测。
 
@@ -15,8 +15,8 @@ Codex 飞书桥接是一个由单一 owner 在 Windows 本机运行的 OpenAI Co
 - **双向消息镜像：**Codex 中由 owner 输入的文本、图片和文件标签同步到对应飞书话题。文本可通过官方 `lark-cli` 以已授权的飞书 owner 身份发出；启动时强制核对 CLI 用户 Open ID 与 `owner_open_id`，不一致即拒绝启用。桥接器按飞书消息 ancestry 抑制代发回调，并覆盖发送与接收的竞态窗口，代发内容不会重新进入 Codex 成为新指令。回退为机器人发送时会使用配置的 owner 显示名明确标注用户发言。飞书注入 Codex 的同一用户 item 按持久 `thread + turn + item` 身份抑制回流，不会重复提交或重复显示。
 - **适合手机阅读：**同步过程消息和 final；发送项目内 Markdown 图片及 Codex 可见图像；文件引用只显示 `🔗【文件名】`，不暴露本地路径；普通链接只显示可读标签。
 - **严格入站路由：**派发前核对 owner、tenant、app、群、话题根、回复后代、任务 epoch、项目根目录和能力授权。
-- **远程输入：**文本、图片和文件分别授权。推荐的 CLI 路径恢复精确任务，并核验已经持久化的 rollout 用户回合。若 Codex 桌面正在持有该任务的写入锁，消息会持久排队，待写入锁释放后重试。附件受大小与格式限制，校验并哈希后写入选定项目的 inbox，不自动执行或解压。
-- **真实提交状态：**只有核验到精确的 Codex 用户回合后，飞书才显示“已提交 Codex”；任务忙碌时只显示一条稳定的排队状态，结果不明确时保持未确认。飞书消息后的空心圈属于客户端原生已读状态，桥接器和普通飞书开放接口都不能将它消除。
+- **远程输入：**文本、图片和文件分别授权。推荐路径先使用 Codex CLI；若 Codex Desktop 已经持有任务 writer，则改由该桌面 writer 提交，并继续核验持久化的 rollout turn ID 与 user-item ID 后才报告成功。附件受大小与格式限制，校验并哈希后写入选定项目的 inbox，不自动执行或解压。
+- **真实提交状态：**只有核验到精确的 Codex 用户回合后，飞书/Lark 才显示“已提交 Codex”；两条 writer 路径都不能确认时，消息保持排队或未确认，不虚报送达。飞书消息后的空心圈属于客户端原生已读状态，桥接器和普通飞书开放接口都不能将它消除。
 - **精确去重：**来源去重不依赖正文相同；rollout item、dispatch 记录、provider outbox 和飞书 UUID 共同保证重启及重试后的至多一次可见投递。
 - **远程审批和控制：**短时、单次审批动作，以及受约束的状态、任务、profile、append、stop 和 hard-stop 命令。
 - **Windows 身份隔离：**飞书凭据只属于 Broker 身份；Codex App Server 可通过另一个非管理员 worker 身份运行，并使用 ACL 与 Job Object 建立边界。
@@ -95,7 +95,7 @@ python -m codex_feishu_bridge verify-config --config config/offline.example.toml
    python -m codex_feishu_bridge run --config .runtime/runtime.toml
    ```
 
-远程文本、图片、文件、审批和控制是五个独立开关，只有明确配置后才会启用。推荐使用 `delivery = "cli"`：它通过 `codex exec resume` 把飞书文字和图片直接写入指定 Codex 任务，不依赖桌面窗口焦点。Codex 每个任务只允许一个写入者；桌面回合正在运行时，飞书输入会保留在队列中，等写入锁释放后再提交。`desktop` 保留为显式选择的 UI 自动化方案，App Server 兼容模式仍要求独立 Windows worker 身份。
+远程文本、图片、文件、审批和控制是五个独立开关，只有明确配置后才会启用。推荐使用 `delivery = "cli"`：无人持有任务时通过 `codex exec resume` 写入；Codex Desktop 已经持有 writer 时，仅针对这个明确冲突改走桌面输入面，并在 rollout 中核验 turn ID 与 user-item ID 后才确认。`desktop` 仍可作为显式选择的 UI 自动化方案，App Server 兼容模式仍要求独立 Windows worker 身份。
 
 ## 目录说明
 

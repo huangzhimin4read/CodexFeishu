@@ -325,6 +325,21 @@ public static class CodexDesktopNative
         }
     }
 
+    public static void SendSelectAll()
+    {
+        var inputs = new[]
+        {
+            Key(0x11, 0),
+            Key(0x41, 0),
+            Key(0x41, 0x0002),
+            Key(0x11, 0x0002)
+        };
+        if (SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<INPUT>()) != inputs.Length)
+        {
+            throw new System.ComponentModel.Win32Exception();
+        }
+    }
+
     public static bool ForceForeground(IntPtr window)
     {
         uint ignored;
@@ -497,6 +512,67 @@ function Copy-ClipboardDataObject {
     return $copy
 }
 
+function Clear-ComposerText {
+    param($Composer, [IntPtr]$WindowHandle)
+    if (-not [CodexDesktopNative]::ForceForeground($WindowHandle)) {
+        throw 'Codex window could not be activated for draft clearing.'
+    }
+    $Composer.accSelect(1, 0)
+    Start-Sleep -Milliseconds 100
+    [CodexDesktopNative]::SendSelectAll()
+    [CodexDesktopNative]::SendKey(0x08)
+}
+
+function Paste-ComposerText {
+    param(
+        $Renderer,
+        [IntPtr]$WindowHandle,
+        [string]$Text,
+        [datetime]$Deadline
+    )
+    if ([string]::IsNullOrEmpty($Text)) {
+        return
+    }
+    $clipboardBackup = Copy-ClipboardDataObject
+    [System.Windows.Forms.Clipboard]::SetText(
+        $Text,
+        [System.Windows.Forms.TextDataFormat]::UnicodeText
+    )
+    $textClipboardSequence = [CodexDesktopNative]::GetClipboardSequenceNumber()
+    try {
+        if (-not [CodexDesktopNative]::ForceForeground($WindowHandle)) {
+            throw 'Codex window could not be activated for text paste.'
+        }
+        $composer = Find-Composer $Renderer
+        if (-not $composer) {
+            throw 'Codex composer disappeared before text paste.'
+        }
+        $composer.accSelect(1, 0)
+        Start-Sleep -Milliseconds 100
+        [CodexDesktopNative]::SendPaste()
+
+        $pasted = $false
+        while ((Get-Date) -lt $Deadline -and -not $pasted) {
+            Start-Sleep -Milliseconds 100
+            $value = Get-AccessibleProperty $composer 'value'
+            $pasted = [string]$value -eq $Text
+        }
+        if (-not $pasted) {
+            throw 'Codex composer did not expose the pasted text before timeout.'
+        }
+    }
+    finally {
+        if ([CodexDesktopNative]::GetClipboardSequenceNumber() -eq $textClipboardSequence) {
+            if ($clipboardBackup) {
+                [System.Windows.Forms.Clipboard]::SetDataObject($clipboardBackup, $true)
+            }
+            else {
+                [System.Windows.Forms.Clipboard]::Clear()
+            }
+        }
+    }
+}
+
 function Attach-Files {
     param(
         $Renderer,
@@ -639,13 +715,15 @@ try {
         $result.ok = $true
     }
     elseif ($Action -eq 'clear') {
-        Set-AccessibleValue $composer ''
+        Clear-ComposerText -Composer $composer -WindowHandle $surface.WindowHandle
         Remove-DraftAttachments $surface.Renderer
         $result.ok = $true
     }
     else {
+        Clear-ComposerText -Composer $composer -WindowHandle $surface.WindowHandle
+        Remove-DraftAttachments $surface.Renderer
         Attach-Files -Renderer $surface.Renderer -WindowHandle $surface.WindowHandle -ProcessId $process.Id -Paths $attachments -Deadline $deadline
-        Set-AccessibleValue $composer $text
+        Paste-ComposerText -Renderer $surface.Renderer -WindowHandle $surface.WindowHandle -Text $text -Deadline $deadline
         if ($Action -eq 'draft') {
             $result.ok = $true
         }
@@ -664,22 +742,24 @@ try {
                     $send = $candidate
                 }
             }
-            if ($send) {
-                $send.accDoDefaultAction(0)
+            if (-not $send -and $attachments.Count -gt 0) {
+                throw 'Codex Send control did not become available for the staged attachment.'
             }
-            else {
-                if ($attachments.Count -gt 0) {
-                    throw 'Codex Send control did not become available for the staged attachment.'
-                }
-                $composer = Find-Composer $surface.Renderer
-                $composer.accSelect(1, 0)
-                if (-not [CodexDesktopNative]::ForceForeground($surface.WindowHandle)) {
-                    throw 'Codex window could not be activated for Enter submission.'
-                }
-                Start-Sleep -Milliseconds 100
-                [CodexDesktopNative]::SendEnter()
-                $result.usedForegroundFallback = $true
+            # Chromium exposes the Send control through MSAA while a turn is
+            # active, but accDoDefaultAction can return successfully without
+            # dispatching the draft. Use its actionable state only as the
+            # readiness gate, then submit through the focused composer.
+            $composer = Find-Composer $surface.Renderer
+            if (-not $composer) {
+                throw 'Codex composer disappeared before Enter submission.'
             }
+            $composer.accSelect(1, 0)
+            if (-not [CodexDesktopNative]::ForceForeground($surface.WindowHandle)) {
+                throw 'Codex window could not be activated for Enter submission.'
+            }
+            Start-Sleep -Milliseconds 100
+            [CodexDesktopNative]::SendEnter()
+            $result.usedForegroundFallback = $true
             $result.ok = $true
             $result.submitted = $true
         }
