@@ -17,7 +17,7 @@ def utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-RUNTIME_SCHEMA_VERSION = 10
+RUNTIME_SCHEMA_VERSION = 12
 
 
 class RuntimeStorage(BridgeStorage):
@@ -204,7 +204,7 @@ class RuntimeStorage(BridgeStorage):
             CREATE TABLE IF NOT EXISTS approval_actions (
                 token_hash TEXT PRIMARY KEY,
                 approval_id TEXT UNIQUE NOT NULL,
-                server_request_id TEXT UNIQUE NOT NULL,
+                server_request_id TEXT NOT NULL,
                 server_method TEXT NOT NULL,
                 thread_id TEXT NOT NULL,
                 turn_id TEXT,
@@ -223,7 +223,8 @@ class RuntimeStorage(BridgeStorage):
                 decision_map_json TEXT NOT NULL,
                 expires_at TEXT NOT NULL,
                 consumed_decision TEXT,
-                consumed_at TEXT
+                consumed_at TEXT,
+                UNIQUE(server_epoch,connection_epoch,server_request_id)
             );
             CREATE TABLE IF NOT EXISTS service_state (
                 singleton INTEGER PRIMARY KEY CHECK(singleton=1),
@@ -259,6 +260,7 @@ class RuntimeStorage(BridgeStorage):
                 request_hash TEXT NOT NULL,
                 request_id TEXT,
                 turn_id TEXT,
+                user_item_id TEXT,
                 state TEXT NOT NULL CHECK(state IN (
                     'prepared','bytes_sending','accepted','outcome_unknown','completed','rejected'
                 )),
@@ -374,6 +376,9 @@ class RuntimeStorage(BridgeStorage):
             "remote_task_grants": {
                 "service_fencing_token": "INTEGER NOT NULL DEFAULT 0",
             },
+            "dispatch_records": {
+                "user_item_id": "TEXT",
+            },
             "approval_actions": {
                 "server_epoch": "TEXT NOT NULL DEFAULT ''",
                 "connection_epoch": "TEXT NOT NULL DEFAULT ''",
@@ -392,9 +397,70 @@ class RuntimeStorage(BridgeStorage):
                     statements.append(f"ALTER TABLE {table} ADD COLUMN {name} {declaration};")
         if statements:
             self.execute_schema_migration("\n".join(statements))
+        self._migrate_approval_request_identity()
         self.connection.execute(
             "UPDATE identity_bindings SET active_chat_id=p2p_chat_id "
             "WHERE active_chat_id IS NULL OR active_chat_id=''"
+        )
+
+    def _migrate_approval_request_identity(self) -> None:
+        """Scope App Server request ids to one connection generation.
+
+        JSON-RPC ids restart from zero after an App Server reconnect.  Older
+        databases made the wire id globally unique, so the first approval
+        after a reconnect could crash the Broker.  Rebuild the table once and
+        retain every historical action while making the actual identity
+        ``(server_epoch, connection_epoch, server_request_id)``.
+        """
+
+        definition = self.connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='approval_actions'"
+        ).fetchone()
+        if definition is None or "server_request_id TEXT UNIQUE NOT NULL" not in str(definition[0]):
+            return
+        self.execute_schema_migration(
+            """
+            ALTER TABLE approval_actions RENAME TO approval_actions_v10;
+            CREATE TABLE approval_actions (
+                token_hash TEXT PRIMARY KEY,
+                approval_id TEXT UNIQUE NOT NULL,
+                server_request_id TEXT NOT NULL,
+                server_method TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                turn_id TEXT,
+                tenant_key TEXT NOT NULL,
+                app_id TEXT NOT NULL,
+                chat_id TEXT NOT NULL,
+                card_message_id TEXT NOT NULL,
+                operator_open_id TEXT NOT NULL,
+                binding_epoch INTEGER NOT NULL,
+                identity_binding_epoch INTEGER NOT NULL,
+                kill_generation INTEGER NOT NULL,
+                server_epoch TEXT NOT NULL,
+                connection_epoch TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                service_fencing_token INTEGER NOT NULL,
+                decision_map_json TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                consumed_decision TEXT,
+                consumed_at TEXT,
+                UNIQUE(server_epoch,connection_epoch,server_request_id)
+            );
+            INSERT INTO approval_actions(
+                token_hash,approval_id,server_request_id,server_method,thread_id,turn_id,
+                tenant_key,app_id,chat_id,card_message_id,operator_open_id,binding_epoch,
+                identity_binding_epoch,kill_generation,server_epoch,connection_epoch,
+                session_id,service_fencing_token,decision_map_json,expires_at,
+                consumed_decision,consumed_at
+            )
+            SELECT token_hash,approval_id,server_request_id,server_method,thread_id,turn_id,
+                tenant_key,app_id,chat_id,card_message_id,operator_open_id,binding_epoch,
+                identity_binding_epoch,kill_generation,server_epoch,connection_epoch,
+                session_id,service_fencing_token,decision_map_json,expires_at,
+                consumed_decision,consumed_at
+            FROM approval_actions_v10;
+            DROP TABLE approval_actions_v10;
+            """
         )
 
     @property

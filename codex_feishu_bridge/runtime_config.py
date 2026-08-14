@@ -29,6 +29,13 @@ class ConversationMode(StrEnum):
     TOPIC_GROUP = "topic_group"
 
 
+class RemoteDeliveryMode(StrEnum):
+    """Writer that owns Feishu-originated Codex user turns."""
+
+    APP_SERVER = "app_server"
+    DESKTOP = "desktop"
+
+
 @dataclass(frozen=True, slots=True)
 class RemoteCapabilities:
     """Individually authorized Feishu-to-Codex capabilities.
@@ -45,10 +52,17 @@ class RemoteCapabilities:
     files: bool = False
     approvals: bool = False
     controls: bool = False
+    auto_approve: bool = False
+    delivery: RemoteDeliveryMode = RemoteDeliveryMode.APP_SERVER
     max_image_bytes: int = 10 * 1024 * 1024
     max_file_bytes: int = 25 * 1024 * 1024
 
     def __post_init__(self) -> None:
+        try:
+            delivery = RemoteDeliveryMode(self.delivery)
+        except ValueError as exc:
+            raise RuntimeConfigurationError("unsupported remote delivery mode") from exc
+        object.__setattr__(self, "delivery", delivery)
         selected = self.text or self.images or self.files or self.approvals or self.controls
         if self.enabled != selected:
             raise RuntimeConfigurationError(
@@ -58,6 +72,10 @@ class RemoteCapabilities:
             raise RuntimeConfigurationError("remote image limit must be within 1..10 MiB")
         if self.max_file_bytes <= 0 or self.max_file_bytes > 100 * 1024 * 1024:
             raise RuntimeConfigurationError("remote file limit must be within 1..100 MiB")
+        if self.auto_approve and not self.approvals:
+            raise RuntimeConfigurationError(
+                "remote.auto_approve requires the approvals capability"
+            )
 
     @property
     def receives_messages(self) -> bool:
@@ -66,6 +84,10 @@ class RemoteCapabilities:
     @property
     def needs_control_plane(self) -> bool:
         return self.enabled and (self.receives_messages or self.approvals)
+
+    @property
+    def uses_desktop(self) -> bool:
+        return self.enabled and self.receives_messages and self.delivery is RemoteDeliveryMode.DESKTOP
 
 
 class RuntimeConfigurationError(ValueError):
@@ -242,15 +264,19 @@ class RuntimeConfig:
                 raise RuntimeConfigurationError(
                     "remote topic routing requires Codex project authority"
                 )
-            if self.worker_isolation is None:
+            if (
+                self.remote.delivery is RemoteDeliveryMode.APP_SERVER
+                and self.worker_isolation is None
+            ):
                 raise RuntimeConfigurationError(
                     "remote capabilities require a separately-principalled App Server worker"
                 )
-            launch_file = self.worker_isolation.launch_file.resolve()
-            if not launch_file.is_relative_to(root / ".runtime"):
-                raise RuntimeConfigurationError(
-                    "isolated worker launch file must stay inside workspace .runtime"
-                )
+            if self.worker_isolation is not None:
+                launch_file = self.worker_isolation.launch_file.resolve()
+                if not launch_file.is_relative_to(root / ".runtime"):
+                    raise RuntimeConfigurationError(
+                        "isolated worker launch file must stay inside workspace .runtime"
+                    )
 
     def allows(self, capability: RuntimeMode) -> bool:
         return _MODE_LEVEL[self.mode] >= _MODE_LEVEL[capability]
@@ -387,6 +413,8 @@ def load_runtime_config(path: Path) -> RuntimeConfig:
             "files",
             "approvals",
             "controls",
+            "auto_approve",
+            "delivery",
             "max_image_bytes",
             "max_file_bytes",
         }
@@ -402,6 +430,8 @@ def load_runtime_config(path: Path) -> RuntimeConfig:
             files=bool(remote_raw.get("files", False)),
             approvals=bool(remote_raw.get("approvals", False)),
             controls=bool(remote_raw.get("controls", False)),
+            auto_approve=bool(remote_raw.get("auto_approve", False)),
+            delivery=RemoteDeliveryMode(str(remote_raw.get("delivery", "app_server"))),
             max_image_bytes=int(remote_raw.get("max_image_bytes", 10 * 1024 * 1024)),
             max_file_bytes=int(remote_raw.get("max_file_bytes", 25 * 1024 * 1024)),
         )

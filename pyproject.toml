@@ -35,6 +35,9 @@ codex-feishu-bridge = "codex_feishu_bridge.__main__:main"
 [tool.setuptools.packages.find]
 include = ["codex_feishu_bridge*"]
 
+[tool.setuptools.package-data]
+codex_feishu_bridge = ["windows/*.ps1"]
+
 [tool.pytest.ini_options]
 addopts = "-ra --strict-markers"
 testpaths = ["tests"]

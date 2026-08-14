@@ -248,7 +248,10 @@ def main() -> int:
     manifest = {
         "generatedAt": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "codexVersionOutput": version_output,
-        "codexExecutable": str(executable),
+        # The executable hash is the compatibility authority. Persisting the
+        # generator host's absolute path would leak machine-specific metadata
+        # into an otherwise publishable baseline.
+        "codexExecutable": "<generated-locally>",
         "codexExecutableSha256": sha256_file(executable),
         "stableProtocolSchemaSha256": matrix["stableProtocolSchemaSha256"],
         "experimentalProtocolSchemaSha256": matrix[

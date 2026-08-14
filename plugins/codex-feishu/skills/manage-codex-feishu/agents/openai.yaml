@@ -1,0 +1,4 @@
+interface:
+  display_name: "Manage Codex Feishu"
+  short_description: "Operate and verify the local Codex Feishu bridge."
+  default_prompt: "Use $manage-codex-feishu to check the bridge status and repair it if needed."

@@ -173,3 +173,73 @@ def test_approval_card_binds_to_the_task_project_chat_not_primary_chat(tmp_path:
         )
         assert result["toast"]["type"] == "success"
         assert connection.responses == [(41, {"decision": "accept"})]
+
+
+def test_auto_approve_uses_session_decision_without_feishu_card(tmp_path: Path) -> None:
+    contract = tmp_path / "contract.json"
+    contract.write_text("{}", encoding="utf-8")
+    binding = FeishuBinding(
+        "tenant", "app", "owner", "p2p", "credential", contract,
+        ConversationMode.TOPIC_GROUP, "primary-chat",
+    )
+    with RuntimeStorage(tmp_path / "db.sqlite") as storage:
+        storage.initialize_runtime(sink_mode="control")
+        storage.connection.execute(
+            "INSERT INTO identity_bindings(binding_key,tenant_key,app_id,owner_open_id,p2p_chat_id,"
+            "active_chat_id,active_chat_type,conversation_mode,binding_epoch,contract_hash,state,updated_at) "
+            "VALUES('owner','tenant','app','owner','p2p','primary-chat','group','topic_group',"
+            "1,'hash','active',?)",
+            (utc_now(),),
+        )
+        storage.connection.execute(
+            "INSERT INTO project_groups(project_id,project_kind,display_name,root_paths_json,chat_id,"
+            "state,last_activity_ms,created_at,updated_at) VALUES('project','local','Project','[]',"
+            "'primary-chat','active',1,?,?)",
+            (utc_now(), utc_now()),
+        )
+        storage.connection.execute(
+            "INSERT INTO task_bindings(thread_id,project_root,chat_id,anchor_message_id,anchor_state,"
+            "current_binding_epoch,identity_binding_epoch,conversation_mode,opted_in,updated_at) "
+            "VALUES('thread','D:/project','primary-chat','anchor','confirmed',1,1,'topic_group',1,?)",
+            (utc_now(),),
+        )
+        storage.connection.execute(
+            "INSERT INTO thread_bindings(thread_id,ownership_state,updated_at) "
+            "VALUES('thread','bridge_owned',?)",
+            (utc_now(),),
+        )
+        storage.connection.execute(
+            "UPDATE service_state SET process_state='running',fencing_token=1,updated_at=? WHERE singleton=1",
+            (utc_now(),),
+        )
+        connection = FakeConnection()
+        connection.server_requests.put(
+            {
+                "id": 7,
+                "method": "item/commandExecution/requestApproval",
+                "params": {
+                    "threadId": "thread",
+                    "turnId": "turn",
+                    "availableDecisions": ["accept", "acceptForSession", "decline"],
+                },
+            }
+        )
+        gateway = ApprovalGateway(
+            storage,
+            connection,
+            ApprovalBroker(storage, b"k" * 32),
+            binding,
+            server_epoch="server",
+            connection_epoch="connection",
+            session_id="session",
+            auto_approve=True,
+        )
+
+        assert gateway.publish_next_request()
+        assert connection.responses == [(7, {"decision": "acceptForSession"})]
+        assert storage.connection.execute(
+            "SELECT COUNT(*) FROM provider_outbox WHERE operation='approval'"
+        ).fetchone()[0] == 0
+        assert storage.connection.execute(
+            "SELECT state FROM approval_requests"
+        ).fetchone()[0] == "outcome_unknown"

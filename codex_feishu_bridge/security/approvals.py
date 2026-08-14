@@ -43,9 +43,10 @@ class ApprovalContext:
 
 @dataclass(frozen=True, slots=True)
 class IssuedApproval:
-    opaque_token: str
+    opaque_token: str | None
     request_hash: str
     expires_at: str
+    created: bool = True
 
 
 def exact_response_hash(response: dict[str, Any]) -> str:
@@ -82,6 +83,35 @@ class ApprovalBroker:
             "+00:00", "Z"
         )
         with self.storage.immediate() as connection:
+            existing = connection.execute(
+                "SELECT a.*,r.request_hash FROM approval_actions a "
+                "JOIN approval_requests r ON r.approval_id=a.approval_id "
+                "WHERE a.server_epoch=? AND a.connection_epoch=? AND a.server_request_id=?",
+                (
+                    context.server_epoch,
+                    context.connection_epoch,
+                    context.server_request_id,
+                ),
+            ).fetchone()
+            if existing is not None:
+                exact_identity = (
+                    existing["approval_id"] == context.approval_id
+                    and existing["request_hash"] == request_hash
+                    and existing["server_method"] == context.server_method
+                    and existing["thread_id"] == context.thread_id
+                    and existing["turn_id"] == context.turn_id
+                    and existing["session_id"] == context.session_id
+                )
+                if not exact_identity:
+                    raise ApprovalError(
+                        "approval request identity was reused with different content"
+                    )
+                return IssuedApproval(
+                    None,
+                    request_hash,
+                    str(existing["expires_at"]),
+                    created=False,
+                )
             connection.execute(
                 "INSERT INTO approval_requests(approval_id,state,request_hash,updated_at) VALUES(?,?,?,?)",
                 (context.approval_id, ApprovalState.ISSUED.value, request_hash, utc_now()),

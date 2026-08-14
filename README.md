@@ -12,10 +12,12 @@ The project is designed around a fail-closed control plane. Unknown identities, 
 
 - **Project and task topics:** activity-triggered private groups for Codex projects, with one Feishu topic per Codex task.
 - **Reliable outbound delivery:** durable SQLite outbox, stable provider UUIDs, retry classification, delivery reconciliation, dead letters, and circuit breakers.
+- **Bidirectional message mirroring:** owner-authored Codex text, images, and path-free file labels are mirrored to the matching Feishu topic. The exact user item injected from Feishu is suppressed on its return path using durable `thread + turn + item` identity, so it is neither resubmitted nor displayed twice.
 - **Readable mobile output:** process/final messages, project-local Markdown images, visible Codex image outputs, file-citation labels, and link destinations hidden from provider-visible text.
 - **Strict inbound routing:** owner, tenant, app, chat, topic root, ancestry, task epoch, project root, and capability binding are checked before dispatch.
-- **Remote inputs:** independently gated text, image, and file input. An idle task uses `turn/start`; an exact active task uses `turn/steer` immediately instead of waiting for the current turn to finish. Files are bounded, hashed, stored under the selected project's inbox, and never auto-executed or auto-extracted.
-- **Truthful submission status:** Feishu reports `submitted` only after Codex App Server accepts the request. Busy/ambiguous or unavailable states are reported as not submitted; no human-style “read” state is invented.
+- **Remote inputs:** independently gated text, image, and file input. The default desktop delivery path navigates to the exact task and submits through the Codex app's own accessibility surface, so the desktop remains the single writer. Files are bounded, hashed, stored under the selected project's inbox, and never auto-executed or auto-extracted.
+- **Truthful submission status:** Feishu reports `submitted` only after the exact user input appears in newly appended Codex rollout bytes. Ambiguous or unavailable outcomes remain unconfirmed; no human-style “read” state is invented.
+- **Exact de-duplication:** source de-duplication never depends on equal message bodies. Rollout item identity, dispatch records, provider outbox identity, and Feishu UUIDs preserve at-most-once visible delivery across retries and restarts.
 - **Approvals and controls:** short-lived single-use approval actions plus scoped status, task, profile, append, stop, and hard-stop commands.
 - **Windows isolation:** provider credentials stay with the broker identity; Codex App Server work can run through a separate non-administrator worker identity with ACL and Job Object boundaries.
 - **Version gates:** the Codex executable and generated stable/experimental App Server schemas are pinned and hashed.
@@ -40,7 +42,7 @@ Feishu owner input
 identity/chat/root/epoch/capability checks
        |
        v
-separate Windows worker -> Codex App Server -> exact task
+Codex desktop accessibility -> desktop-owned writer -> exact task
 ```
 
 The bridge is deliberately local. There is no public webhook and no project-wide directory crawl. Project and task identity come from the configured Codex state, while every writable project root remains allowlisted.
@@ -52,7 +54,8 @@ The bridge is deliberately local. There is no public webhook and no project-wide
 - An installed Codex CLI/App Server executable
 - A Feishu custom app and bot with tenant-approved permissions for the features you enable
 - Windows Credential Manager for the Feishu app secret
-- A separate non-administrator Windows account before enabling remote control or approvals
+- An interactive Codex desktop session for `delivery = "desktop"`
+- A separate non-administrator Windows account only for the legacy `delivery = "app_server"` compatibility path
 
 Feishu scopes, callback subscriptions, rate limits, and response contracts can change. Treat the example contract as a template and validate it against the current developer-console export for your tenant.
 
@@ -91,7 +94,7 @@ For a real local configuration:
    python -m codex_feishu_bridge run --config .runtime/runtime.toml
    ```
 
-Remote text, images, files, approvals, and controls are separate booleans and remain disabled until explicitly configured. The same-account fallback for high-privilege App Server work is intentionally rejected.
+Remote text, images, files, approvals, and controls are separate booleans and remain disabled until explicitly configured. Use `delivery = "desktop"` when Feishu input must appear in the Codex desktop task. The App Server compatibility path still requires a separately principalled worker.
 
 ## Repository layout
 
@@ -100,9 +103,22 @@ Remote text, images, files, approvals, and controls are separate booleans and re
 | `codex_feishu_bridge/` | Bridge runtime, protocol adapters, storage, security controls, and operations |
 | `config/*.example.*` | Fail-closed configuration and tenant-contract templates |
 | `generated/codex/` | Pinned Codex App Server schema fixtures and compatibility matrix |
+| `plugins/codex-feishu/` | Optional Codex plugin for guarded status, verification, deployment, and diagnosis workflows |
 | `scripts/` | Baseline generation, evidence, Windows isolation, and service helpers |
 | `tests/` | Unit, protocol, routing, storage-fault, image, and service tests |
 | `SECURITY.md` | Trust boundaries and vulnerability-reporting rules |
+
+## Codex plugin
+
+The repository includes an optional `codex-feishu` plugin. It gives Codex a validated management skill and a path-safe, read-only health check for this bridge; the Windows scheduled service remains the always-on transport.
+
+To publish or install the plugin through a personal marketplace, copy `plugins/codex-feishu/` into that marketplace's plugin source directory, register the local source in its `marketplace.json`, and run:
+
+```powershell
+codex plugin add codex-feishu@personal
+```
+
+The plugin deliberately contains no credentials, tenant IDs, live configuration, or runtime database.
 
 ## Files that must stay private
 

@@ -46,6 +46,7 @@ class ApprovalGateway:
         server_epoch: str,
         connection_epoch: str,
         session_id: str,
+        auto_approve: bool = False,
     ) -> None:
         self.storage = storage
         self.connection = connection
@@ -54,6 +55,7 @@ class ApprovalGateway:
         self.server_epoch = server_epoch
         self.connection_epoch = connection_epoch
         self.session_id = session_id
+        self.auto_approve = auto_approve
 
     def publish_next_request(self) -> bool:
         try:
@@ -105,9 +107,17 @@ class ApprovalGateway:
             "SELECT kill_generation,fencing_token FROM service_state WHERE singleton=1"
         ).fetchone()
         request_id = str(request_id)
+        upstream_approval_id = str(params.get("approvalId") or "")
         approval_id = str(
-            params.get("approvalId")
-            or uuid.uuid5(uuid.NAMESPACE_URL, f"approval:{self.connection_epoch}:{request_id}")
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                "approval:"
+                + self.connection_epoch
+                + ":"
+                + request_id
+                + ":"
+                + upstream_approval_id,
+            )
         )
         decision_map = _decision_map(method, params)
         # The eventual callback context contains the created card message id. A
@@ -132,11 +142,50 @@ class ApprovalGateway:
             session_id=self.session_id,
             service_fencing_token=int(service["fencing_token"]),
         )
-        issued = self.broker.issue(
-            context=context,
-            request=params,
-            decision_map=decision_map,
+        try:
+            issued = self.broker.issue(
+                context=context,
+                request=params,
+                decision_map=decision_map,
+            )
+        except ApprovalError as exc:
+            self.connection.respond_error(
+                _request_id_value(request_id),
+                code=-32600,
+                message="Conflicting duplicate approval request",
+            )
+            return True
+        if not issued.created:
+            return True
+        assert issued.opaque_token is not None
+        automatic_decision = (
+            _automatic_decision(method, decision_map) if self.auto_approve else None
         )
+        if automatic_decision is not None:
+            approval_id, response = self.broker.commit_card_action(
+                opaque_token=issued.opaque_token,
+                decision=automatic_decision,
+                tenant_key=context.tenant_key,
+                app_id=context.app_id,
+                chat_id=context.chat_id,
+                card_message_id=context.card_message_id,
+                operator_open_id=context.operator_open_id,
+                binding_epoch=context.binding_epoch,
+                identity_binding_epoch=context.identity_binding_epoch,
+                kill_generation=context.kill_generation,
+                server_epoch=context.server_epoch,
+                connection_epoch=context.connection_epoch,
+                session_id=context.session_id,
+                service_fencing_token=context.service_fencing_token,
+            )
+            self.broker.commit_exact_response(approval_id, response)
+            try:
+                self.connection.respond(_request_id_value(request_id), response)
+            except Exception:
+                self.broker.record_response_result(approval_id, accepted=None)
+                return True
+            self.broker.record_response_result(approval_id, accepted=None)
+            return True
         card = _approval_card(method, issued.opaque_token, tuple(decision_map), params)
         body_json = json.dumps(card, ensure_ascii=False, separators=(",", ":"))
         now = utc_now()
@@ -293,8 +342,9 @@ class ApprovalGateway:
         request_id = str(params.get("requestId"))
         row = self.storage.connection.execute(
             "SELECT a.approval_id,a.consumed_decision,r.state FROM approval_actions a "
-            "JOIN approval_requests r ON r.approval_id=a.approval_id WHERE a.server_request_id=?",
-            (request_id,),
+            "JOIN approval_requests r ON r.approval_id=a.approval_id "
+            "WHERE a.server_epoch=? AND a.connection_epoch=? AND a.server_request_id=?",
+            (self.server_epoch, self.connection_epoch, request_id),
         ).fetchone()
         if row is None or row["state"] not in {"response_sending", "outcome_unknown"}:
             return False
@@ -326,6 +376,24 @@ def _request_id_value(value: str) -> int | str:
         return int(value)
     except ValueError:
         return value
+
+
+def _automatic_decision(
+    method: str, decision_map: dict[str, dict[str, Any]]
+) -> str | None:
+    """Choose the strongest positive approval without answering user questions."""
+
+    if method in {"item/tool/requestUserInput", "mcpServer/elicitation/request"}:
+        return None
+    for decision in (
+        "acceptForSession",
+        "approved_for_session",
+        "accept",
+        "approved",
+    ):
+        if decision in decision_map:
+            return decision
+    return None
 
 
 def _decision_map(method: str, params: dict[str, Any]) -> dict[str, dict[str, Any]]:

@@ -12,10 +12,12 @@ Codex 飞书桥接是一个由单一 owner 在 Windows 本机运行的 OpenAI Co
 
 - **按项目和任务组织话题：**项目活动后按需创建私有项目群，每个 Codex 任务对应一个飞书话题。
 - **可靠出站：**SQLite 持久 outbox、稳定 UUID、重试分类、投递对账、死信和熔断器。
+- **双向消息镜像：**Codex 中由 owner 输入的文本、图片和文件标签同步到对应飞书话题；飞书注入 Codex 的同一用户 item 按持久 `thread + turn + item` 身份抑制回流，不会重复提交或重复显示。
 - **适合手机阅读：**同步过程消息和 final；发送项目内 Markdown 图片及 Codex 可见图像；文件引用只显示 `🔗【文件名】`，不暴露本地路径；普通链接只显示可读标签。
 - **严格入站路由：**派发前核对 owner、tenant、app、群、话题根、回复后代、任务 epoch、项目根目录和能力授权。
-- **远程输入：**文本、图片和文件分别授权。任务空闲时使用 `turn/start`；存在可精确识别的活动回合时立即使用 `turn/steer`，不等待当前回合结束。附件受大小与格式限制，校验并哈希后写入选定项目的 inbox，不自动执行或解压。
-- **真实提交状态：**只有 Codex App Server 接受请求后，飞书才显示“已提交 Codex”；忙碌且无法确定目标或服务不可用时明确显示尚未提交，不虚构人类式“已读”状态。
+- **远程输入：**文本、图片和文件分别授权。默认桌面投递路径先定位精确任务，再通过 Codex 应用自身的辅助功能输入面提交，桌面始终是唯一写入者。附件受大小与格式限制，校验并哈希后写入选定项目的 inbox，不自动执行或解压。
+- **真实提交状态：**只有完全一致的用户输入出现在 Codex 新增 rollout 字节中，飞书才显示“已提交 Codex”；无法确认时保持未确认状态，不虚构人类式“已读”。
+- **精确去重：**来源去重不依赖正文相同；rollout item、dispatch 记录、provider outbox 和飞书 UUID 共同保证重启及重试后的至多一次可见投递。
 - **远程审批和控制：**短时、单次审批动作，以及受约束的状态、任务、profile、append、stop 和 hard-stop 命令。
 - **Windows 身份隔离：**飞书凭据只属于 Broker 身份；Codex App Server 可通过另一个非管理员 worker 身份运行，并使用 ACL 与 Job Object 建立边界。
 - **版本 Gate：**固定 Codex 可执行文件及稳定版/实验版 App Server schema，并校验哈希。
@@ -40,7 +42,7 @@ Codex Desktop 状态 / rollout 文件
 身份/群/root/epoch/能力核对
       |
       v
-独立 Windows worker -> Codex App Server -> 精确任务
+Codex 桌面辅助功能 -> 桌面持有的写入者 -> 精确任务
 ```
 
 桥接器只在本机运行，不开放公共 webhook，也不扫描任意项目目录。项目和任务身份来自已配置的 Codex 状态，所有可写项目根目录仍必须在 allowlist 内。
@@ -52,7 +54,8 @@ Codex Desktop 状态 / rollout 文件
 - 已安装的 Codex CLI/App Server 可执行文件
 - 已创建并发布的飞书自建应用和机器人，以及租户管理员批准的所需权限
 - 使用 Windows 凭据管理器保存飞书 App Secret
-- 启用远程控制或审批前，准备另一个非管理员 Windows 账户
+- 使用 `delivery = "desktop"` 时保持 Codex 桌面处于已登录的交互会话
+- 只有兼容模式 `delivery = "app_server"` 需要另一个非管理员 Windows 账户
 
 飞书权限、回调订阅、限流和响应合同可能变化。示例合同只能作为模板，实际启用前必须根据当前租户开发者后台导出结果重新核对。
 
@@ -91,7 +94,7 @@ python -m codex_feishu_bridge verify-config --config config/offline.example.toml
    python -m codex_feishu_bridge run --config .runtime/runtime.toml
    ```
 
-远程文本、图片、文件、审批和控制是五个独立开关，只有明确配置后才会启用。高权限 App Server 工作不允许退回与 Broker 相同的 Windows 身份。
+远程文本、图片、文件、审批和控制是五个独立开关，只有明确配置后才会启用。飞书消息需要出现在 Codex 桌面任务时使用 `delivery = "desktop"`；App Server 兼容模式仍要求独立 Windows worker 身份。
 
 ## 目录说明
 
@@ -100,9 +103,22 @@ python -m codex_feishu_bridge verify-config --config config/offline.example.toml
 | `codex_feishu_bridge/` | 运行服务、协议适配、存储、安全控制和运维模块 |
 | `config/*.example.*` | 默认 fail-closed 的配置与租户合同模板 |
 | `generated/codex/` | 固定版本 Codex App Server schema 和兼容矩阵 |
+| `plugins/codex-feishu/` | 可选 Codex 插件，用于受控的状态检查、验证、部署和诊断 |
 | `scripts/` | 协议基线、证据、Windows 隔离和服务辅助脚本 |
 | `tests/` | 单元、协议、路由、存储故障、图片和服务测试 |
 | `SECURITY.md` | 信任边界与安全问题报告规则 |
+
+## Codex 插件
+
+仓库包含可选的 `codex-feishu` 插件，为 Codex 提供经过校验的管理 skill 和不暴露路径的只读健康检查；常驻消息传输仍由 Windows 计划任务服务负责。
+
+如需通过个人 marketplace 发布或安装，将 `plugins/codex-feishu/` 复制到该 marketplace 的插件源码目录，在其 `marketplace.json` 中登记本地来源，然后执行：
+
+```powershell
+codex plugin add codex-feishu@personal
+```
+
+插件本身不包含凭据、租户 ID、真实运行配置或运行数据库。
 
 ## 不得公开的文件
 

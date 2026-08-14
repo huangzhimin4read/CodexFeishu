@@ -10,7 +10,7 @@ from ..runtime_storage import RuntimeStorage
 from .outbound import stable_uuid
 
 
-_STATUSES = frozenset({"control", "pending", "submitted"})
+_STATUSES = frozenset({"control", "pending", "unconfirmed", "submitted"})
 
 
 def queue_ingress_status(
@@ -25,9 +25,12 @@ def queue_ingress_status(
 ) -> int | None:
     """Queue one idempotent provider-visible status for an ingress message.
 
-    ``pending`` means the message is not yet accepted by Codex. ``submitted``
-    means Codex App Server accepted a new turn. Neither state is described as
-    "read", because the protocol exposes no human-read receipt.
+    ``pending`` means the bridge will retry because dispatch has not started.
+    ``unconfirmed`` means the desktop operation may have happened but exact
+    Codex acceptance could not be proved. ``submitted`` means the selected
+    Codex writer accepted a new user turn. In desktop mode, acceptance requires
+    that exact input to appear in newly appended rollout bytes. No state is
+    described as "read", because Codex exposes no human-read receipt.
     """
 
     if status not in _STATUSES:

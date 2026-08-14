@@ -10,7 +10,7 @@ database = "../.runtime/topic-group.sqlite3"
 shadow_database = "../.runtime/topic-group-shadow.sqlite3"
 codex_home = "C:/Users/REPLACE_USER/.codex"
 codex_executable = "C:/Users/REPLACE_USER/AppData/Roaming/npm/node_modules/@openai/codex/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe"
-schema_root = "../generated/codex/0.145.0"
+schema_root = "../generated/codex/0.147.0-alpha.6.6"
 status = "../.runtime/topic-group-status.json"
 backup_root = "../.runtime/topic-group-backups"
 
@@ -30,13 +30,18 @@ images = false
 files = false
 approvals = false
 controls = false
+auto_approve = false
+# "desktop" routes input through the Codex app's own writer and confirms the
+# resulting user turn from newly appended rollout bytes. "app_server" is the
+# isolated-worker compatibility mode.
+delivery = "desktop"
 max_image_bytes = 10485760
 max_file_bytes = 26214400
 
-# Required before setting any remote capability to true. The scheduled task
-# must run as a different, non-administrator Windows account. The worker may
-# access selected Codex state/project roots, but not this bridge's .runtime
-# directory or Windows Credential Manager secret.
+# Required only for delivery="app_server". The scheduled task must run as a
+# different, non-administrator Windows account. The worker may access selected
+# Codex state/project roots, but not this bridge's .runtime directory or
+# Windows Credential Manager secret.
 #[worker_isolation]
 #worker_sid = "S-1-5-21-REPLACE-WORKER-SID"
 #scheduled_task_name = "CodexFeishu-Worker-Owner"

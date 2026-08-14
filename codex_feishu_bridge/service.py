@@ -19,7 +19,9 @@ from .codex.compatibility import CompatibilityMatrix
 from .codex.connection import AppServerConnection
 from .codex.isolated_transport import IsolatedAppServerTransport
 from .codex.controller import CodexController, DispatchBusy, DispatchError
-from .codex.execution_profile import ExecutionProfile, SandboxType
+from .codex.desktop_dispatch import DesktopCodexDispatcher
+from .codex.desktop_gateway import CodexDesktopGateway, DesktopGatewayError
+from .codex.execution_profile import ApprovalPolicy, ExecutionProfile, SandboxType
 from .codex.rollout_observer import IncrementalRolloutReader
 from .codex.shadow_observer import ShadowObserver
 from .codex.project_catalog import CodexProjectCatalog
@@ -143,6 +145,8 @@ class BridgeService:
         self.client: FeishuClient | None = None
         self.codex_connection: AppServerConnection | None = None
         self.controller: CodexController | None = None
+        self.desktop_gateway: CodexDesktopGateway | None = None
+        self.desktop_dispatcher: DesktopCodexDispatcher | None = None
         self.gateway: ApprovalGateway | None = None
         self.ingress: IngressRouter | None = None
         self.outbox_worker: OutboxWorker | None = None
@@ -362,7 +366,18 @@ class BridgeService:
             server_epoch=self.server_epoch,
             connection_epoch=self.connection_epoch,
             session_id=self.instance_id,
+            auto_approve=self.config.remote.auto_approve,
         )
+        if self.config.remote.uses_desktop:
+            self.desktop_gateway = CodexDesktopGateway()
+            self.desktop_dispatcher = DesktopCodexDispatcher(
+                self.storage,
+                self.desktop_gateway,
+                codex_home=self.config.codex_home,
+                authorize=self.controller.require_dispatchable,
+                server_epoch=self.server_epoch,
+                connection_epoch=self.connection_epoch,
+            )
 
     def _configure_inbound(self) -> None:
         binding = self.config.feishu
@@ -744,6 +759,11 @@ class BridgeService:
         default = ExecutionProfile(
             SandboxType.WORKSPACE_WRITE,
             cwd,
+            approval_policy=(
+                ApprovalPolicy.NEVER
+                if self.config.remote.auto_approve
+                else ApprovalPolicy.ON_REQUEST
+            ),
             network_access=False,
             writable_roots=(cwd,),
         )
@@ -826,7 +846,13 @@ class BridgeService:
                 try:
                     profiles = self._profile_controller(row["target_thread_id"])
                     self._execute_control(row, command, profiles)
-                except (ControlError, DispatchError, ServiceError, ValueError):
+                except (
+                    ControlError,
+                    DispatchError,
+                    DesktopGatewayError,
+                    ServiceError,
+                    ValueError,
+                ):
                     self._reject_ingress(row, "控制命令未通过当前任务状态或安全边界校验，未执行。")
                 continue
             if row["target_thread_id"] is None:
@@ -839,20 +865,50 @@ class BridgeService:
             if input_items is None:
                 continue
             try:
-                active_turn_id = self._rollout_turn_hint(row["target_thread_id"])
-                profiles = self._profile_controller(row["target_thread_id"])
-                profile = profiles.load(row["target_thread_id"])
-                profile_hash = profiles.persist(row["target_thread_id"], profile)
-                result = self.controller.dispatch(
-                    ingress_message_id=row["message_id"],
-                    thread_id=row["target_thread_id"],
-                    text=dispatch_text,
-                    input_items=input_items,
-                    required_capability=capability,
-                    profile=profile,
-                    profile_hash=profile_hash,
-                    active_turn_id=active_turn_id,
-                )
+                if self.config.remote.uses_desktop:
+                    if self.desktop_dispatcher is None:
+                        raise ServiceError("desktop Codex dispatcher is unavailable")
+                    attachment_paths = tuple(
+                        Path(str(item["path"]))
+                        for item in input_items
+                        if item.get("type") == "localImage"
+                        and isinstance(item.get("path"), str)
+                    )
+                    if capability == "file":
+                        attachment = self.storage.connection.execute(
+                            "SELECT local_path FROM ingress_attachments WHERE message_id=?",
+                            (row["message_id"],),
+                        ).fetchone()
+                        if attachment is None or not attachment["local_path"]:
+                            raise ServiceError("desktop file attachment path is unavailable")
+                        attachment_paths += (Path(str(attachment["local_path"])),)
+                    result = self.desktop_dispatcher.dispatch(
+                        ingress_message_id=row["message_id"],
+                        thread_id=row["target_thread_id"],
+                        text=dispatch_text,
+                        required_capability=capability,
+                        attachment_paths=attachment_paths,
+                    )
+                else:
+                    active_turn_id = self._rollout_turn_hint(row["target_thread_id"])
+                    profiles = self._profile_controller(row["target_thread_id"])
+                    profile = profiles.load(row["target_thread_id"])
+                    if (
+                        self.config.remote.auto_approve
+                        and profile.approval_policy is not ApprovalPolicy.NEVER
+                    ):
+                        profile = replace(profile, approval_policy=ApprovalPolicy.NEVER)
+                    profile_hash = profiles.persist(row["target_thread_id"], profile)
+                    result = self.controller.dispatch(
+                        ingress_message_id=row["message_id"],
+                        thread_id=row["target_thread_id"],
+                        text=dispatch_text,
+                        input_items=input_items,
+                        required_capability=capability,
+                        profile=profile,
+                        profile_hash=profile_hash,
+                        active_turn_id=active_turn_id,
+                    )
                 if result.state == "accepted" and result.turn_id is not None:
                     self.storage.connection.execute(
                         "UPDATE ingress_messages SET last_dispatch_error=NULL "
@@ -867,6 +923,10 @@ class BridgeService:
                     )
                     self._active_rollout_turns[row["target_thread_id"]] = (
                         existing | frozenset({result.turn_id})
+                    )
+                elif result.state == "outcome_unknown":
+                    self._queue_unconfirmed_ack(
+                        row["message_id"], row["target_thread_id"]
                     )
             except DispatchBusy:
                 self._queue_pending_ack(
@@ -1080,28 +1140,51 @@ class BridgeService:
         elif command.name in {"sandbox", "network", "approval-policy", "cwd", "writable"}:
             if row["target_thread_id"] is None:
                 raise ServiceError("profile command requires a selected task")
+            if self.config.remote.uses_desktop:
+                raise ControlError(
+                    "desktop-owned tasks keep execution settings in the Codex desktop host"
+                )
             profile_hash = profiles.apply(row["target_thread_id"], command)
             acknowledgement = f"下一 turn 的执行配置已更新：{profile_hash[:12]}"
         elif command.name == "append":
-            active = self.storage.connection.execute(
-                "SELECT turn_id FROM dispatch_records WHERE thread_id=? AND state='accepted' "
-                "ORDER BY created_at DESC LIMIT 1", (row["target_thread_id"],)
-            ).fetchone()
-            if active is None:
-                raise ServiceError("append requires an active known turn")
-            self.controller.append(
-                row["target_thread_id"], active["turn_id"], command.argument, row["message_id"]
-            )
-            acknowledgement = f"已追加到 turn {active['turn_id'][:12]}"
+            if self.config.remote.uses_desktop:
+                if self.desktop_dispatcher is None:
+                    raise ServiceError("desktop Codex dispatcher is unavailable")
+                result = self.desktop_dispatcher.dispatch(
+                    ingress_message_id=row["message_id"],
+                    thread_id=row["target_thread_id"],
+                    text=command.argument,
+                    required_capability="controls",
+                )
+                if result.state != "accepted" or result.turn_id is None:
+                    raise ServiceError("desktop append acceptance is unconfirmed")
+                acknowledgement = f"已提交给 Codex turn {result.turn_id[:12]}"
+            else:
+                active = self.storage.connection.execute(
+                    "SELECT turn_id FROM dispatch_records WHERE thread_id=? AND state='accepted' "
+                    "ORDER BY created_at DESC LIMIT 1", (row["target_thread_id"],)
+                ).fetchone()
+                if active is None:
+                    raise ServiceError("append requires an active known turn")
+                self.controller.append(
+                    row["target_thread_id"], active["turn_id"], command.argument, row["message_id"]
+                )
+                acknowledgement = f"已追加到 turn {active['turn_id'][:12]}"
         elif command.name == "stop":
-            active = self.storage.connection.execute(
-                "SELECT turn_id FROM dispatch_records WHERE thread_id=? AND state='accepted' "
-                "ORDER BY created_at DESC LIMIT 1", (row["target_thread_id"],)
-            ).fetchone()
-            if active is None:
-                raise ServiceError("stop requires an active known turn")
-            self.controller.stop(row["target_thread_id"], active["turn_id"])
-            acknowledgement = f"已请求中断 turn {active['turn_id'][:12]}"
+            if self.config.remote.uses_desktop:
+                if self.desktop_gateway is None:
+                    raise ServiceError("desktop Codex gateway is unavailable")
+                self.desktop_gateway.stop(row["target_thread_id"])
+                acknowledgement = "已通过 Codex 桌面请求停止当前回合。"
+            else:
+                active = self.storage.connection.execute(
+                    "SELECT turn_id FROM dispatch_records WHERE thread_id=? AND state='accepted' "
+                    "ORDER BY created_at DESC LIMIT 1", (row["target_thread_id"],)
+                ).fetchone()
+                if active is None:
+                    raise ServiceError("stop requires an active known turn")
+                self.controller.stop(row["target_thread_id"], active["turn_id"])
+                acknowledgement = f"已请求中断 turn {active['turn_id'][:12]}"
         elif command.name == "hard-stop":
             EmergencyController(self.storage, self._terminate_codex).hard_stop("owner_command")
             self.stop_event.set()
@@ -1119,10 +1202,16 @@ class BridgeService:
                 f"unknown={snapshot.ingress_indeterminate}；breakers={len(snapshot.open_breakers)}"
             )
         elif command.name == "help":
-            acknowledgement = (
-                "命令：/tasks /use <task> /status /sandbox <mode> /writable <path> "
-                "/network on|off /cwd <path> /approval-policy <policy> /append <text> /stop /hard-stop"
-            )
+            if self.config.remote.uses_desktop:
+                acknowledgement = (
+                    "命令：/tasks /status /append <text> /stop /hard-stop。"
+                    "执行权限、目录和网络设置由 Codex 桌面当前任务管理。"
+                )
+            else:
+                acknowledgement = (
+                    "命令：/tasks /use <task> /status /sandbox <mode> /writable <path> "
+                    "/network on|off /cwd <path> /approval-policy <policy> /append <text> /stop /hard-stop"
+                )
         # Read-only help/status/tasks are acknowledged by status/card UX; they
         # never dispatch a Codex turn.
         self.storage.connection.execute(
@@ -1176,6 +1265,19 @@ class BridgeService:
             target_thread_id=target_thread_id,
             status="pending",
             text="⏳ 尚未提交 Codex：当前任务忙碌或服务暂不可用，正在排队重试。",
+            priority=210,
+        )
+
+    def _queue_unconfirmed_ack(
+        self, message_id: str, target_thread_id: str | None
+    ) -> None:
+        queue_ingress_status(
+            self.storage,
+            self.config.feishu,
+            message_id=message_id,
+            target_thread_id=target_thread_id,
+            status="unconfirmed",
+            text="⚠ 未能确认已提交 Codex：请先在 Codex 任务中核对，避免重复发送。",
             priority=210,
         )
 

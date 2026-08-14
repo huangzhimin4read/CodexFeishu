@@ -1,0 +1,12 @@
+{
+  "codexExecutable": "<generated-locally>",
+  "codexExecutableSha256": "592958896CBFFA154709618476FC9C9BF7FE73957E9A4FC12094C5051B6C69B3",
+  "codexVersionOutput": "codex-cli 0.147.0-alpha.6.6",
+  "experimentalProtocolSchemaSha256": "B8FF05B6F127C7D54D209D10E388530AA4AD271819A1899D91001E9E760EEFE9",
+  "generatedAt": "2026-08-14T06:49:09.085998Z",
+  "generationCommands": [
+    "codex.exe app-server generate-json-schema --out <stable>",
+    "codex.exe app-server generate-json-schema --experimental --out <experimental>"
+  ],
+  "stableProtocolSchemaSha256": "98A02E7ED08E78A1B1B878EB3B6D5A82E723CFF8218FA30B337F120B5E855D87"
+}

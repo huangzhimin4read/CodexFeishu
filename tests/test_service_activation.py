@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 from codex_feishu_bridge.codex.rollout_observer import IncrementalRolloutReader
 from codex_feishu_bridge.codex.state_discovery import RolloutSource
+from codex_feishu_bridge.codex.controller import DispatchResult
 from codex_feishu_bridge.runtime_storage import RuntimeStorage
 from codex_feishu_bridge.service import (
     BridgeService,
@@ -266,3 +267,110 @@ def test_busy_dispatch_queues_not_submitted_status_once(tmp_path: Path) -> None:
             1,
         )
         assert "尚未提交 Codex" in rows[0]["body_json"]
+
+
+def test_desktop_ingress_uses_desktop_writer_and_only_then_queues_submitted(
+    tmp_path: Path,
+) -> None:
+    contract = tmp_path / "contract.json"
+    contract.write_text("{}", encoding="utf-8")
+
+    class RecordingDesktopDispatcher:
+        calls: list[dict[str, object]] = []
+
+        def dispatch(self, **kwargs):
+            self.calls.append(kwargs)
+            return DispatchResult("attempt", "desktop-turn", "accepted")
+
+    with RuntimeStorage(tmp_path / "runtime.db") as storage:
+        storage.initialize_runtime(sink_mode="control")
+        storage.connection.execute(
+            "INSERT INTO task_bindings(thread_id,project_root,chat_id,anchor_message_id,anchor_state,"
+            "anchor_uuid,anchor_marker,conversation_mode,opted_in,updated_at) "
+            "VALUES('thread','D:/project','topic-chat','anchor','confirmed','uuid','marker',"
+            "'topic_group',1,datetime('now'))"
+        )
+        storage.connection.execute(
+            "INSERT INTO ingress_messages(tenant_key,app_id,message_id,chat_id,sender_open_id,"
+            "chat_type,message_type,content_hash,raw_hash,received_at,ingest_seq,routing_state,"
+            "target_thread_id) VALUES('tenant','app','incoming','topic-chat','owner','group',"
+            "'text','content','raw',datetime('now'),1,'routed_current','thread')"
+        )
+        storage.connection.execute(
+            "INSERT INTO ingress_payloads(message_id,text,created_at,expires_at) "
+            "VALUES('incoming','来自飞书的正式输入',datetime('now'),datetime('now','+1 day'))"
+        )
+        service = object.__new__(BridgeService)
+        service.storage = storage
+        service.config = SimpleNamespace(
+            feishu=FeishuBinding(
+                "tenant",
+                "app",
+                "owner",
+                "fallback",
+                "target",
+                contract,
+                ConversationMode.TOPIC_GROUP,
+                "topic-chat",
+            ),
+            remote=SimpleNamespace(uses_desktop=True),
+        )
+        service.ingress = object()
+        service.controller = object()
+        service.client = object()
+        service.desktop_dispatcher = RecordingDesktopDispatcher()
+        service._active_rollout_turns = {}
+
+        service._process_ingress()
+
+        assert service.desktop_dispatcher.calls == [
+            {
+                "ingress_message_id": "incoming",
+                "thread_id": "thread",
+                "text": "来自飞书的正式输入",
+                "required_capability": "text",
+                "attachment_paths": (),
+            }
+        ]
+        acknowledgement = storage.connection.execute(
+            "SELECT logical_message_id,body_json FROM provider_outbox "
+            "WHERE logical_message_id='submitted-ack:incoming'"
+        ).fetchone()
+        assert acknowledgement is not None
+        assert "已提交 Codex" in acknowledgement["body_json"]
+        assert service._active_rollout_turns == {
+            "thread": frozenset({"desktop-turn"})
+        }
+
+
+def test_unconfirmed_desktop_dispatch_does_not_claim_retry_or_submission(
+    tmp_path: Path,
+) -> None:
+    contract = tmp_path / "contract.json"
+    contract.write_text("{}", encoding="utf-8")
+    with RuntimeStorage(tmp_path / "runtime.db") as storage:
+        storage.initialize_runtime(sink_mode="control")
+        service = object.__new__(BridgeService)
+        service.storage = storage
+        service.config = SimpleNamespace(
+            feishu=FeishuBinding(
+                "tenant",
+                "app",
+                "owner",
+                "fallback",
+                "target",
+                contract,
+                ConversationMode.TOPIC_GROUP,
+                "topic-chat",
+            )
+        )
+
+        service._queue_unconfirmed_ack("incoming", "thread")
+
+        row = storage.connection.execute(
+            "SELECT logical_message_id,body_json FROM provider_outbox "
+            "WHERE logical_message_id='unconfirmed-ack:incoming'"
+        ).fetchone()
+        assert row is not None
+        assert "未能确认已提交 Codex" in row["body_json"]
+        assert "重试" not in row["body_json"]

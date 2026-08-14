@@ -1,0 +1,39 @@
+{
+  "name": "codex-feishu",
+  "version": "0.1.0+codex.20260814093630",
+  "description": "Operate and verify the owner-only Windows bridge between Codex desktop tasks and Feishu topics.",
+  "author": {
+    "name": "Huang Zhimin",
+    "url": "https://github.com/huangzhimin4read"
+  },
+  "homepage": "https://github.com/huangzhimin4read/CodexFeishu",
+  "repository": "https://github.com/huangzhimin4read/CodexFeishu",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "feishu",
+    "lark",
+    "bridge",
+    "windows"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Codex Feishu",
+    "shortDescription": "Manage the local Codex and Feishu task bridge.",
+    "longDescription": "Provides guarded workflows for installing, checking, testing, deploying, restarting, and diagnosing the owner-only Codex Feishu bridge. The always-on bridge remains a Windows scheduled service so Feishu input can enter the exact Codex desktop task even when no plugin tool is running.",
+    "developerName": "Huang Zhimin",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/huangzhimin4read/CodexFeishu",
+    "defaultPrompt": [
+      "Check whether the Codex Feishu bridge is healthy.",
+      "Verify a Feishu message reached this Codex task.",
+      "Deploy and restart the Codex Feishu bridge safely."
+    ],
+    "brandColor": "#3370FF"
+  }
+}

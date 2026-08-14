@@ -1,4 +1,5 @@
 import json
+import json
 import sqlite3
 import unicodedata
 from hashlib import sha256
@@ -19,8 +20,14 @@ from codex_feishu_bridge.models import (
 from codex_feishu_bridge.runtime_storage import RuntimeStorage, utc_now
 
 
-def _event(kind: EventKind, item: str, text: str) -> NormalizedEvent:
-    return NormalizedEvent("thread", "turn", item, kind, 0, text, "fixture")
+def _event(
+    kind: EventKind,
+    item: str,
+    text: str,
+    *,
+    source_type: str = "fixture",
+) -> NormalizedEvent:
+    return NormalizedEvent("thread", "turn", item, kind, 0, text, source_type)
 
 
 def _prepare(
@@ -77,6 +84,48 @@ def test_rollout_items_outbox_and_cursor_commit_atomically(tmp_path: Path) -> No
         storage.finish_outbox(first["outbox_id"], "worker", state="confirmed", provider_message_id="m1")
         second = storage.lease_outbox("worker", "2999-01-01T00:00:00Z")
         assert second["operation"] == "final"
+
+
+def test_codex_user_message_is_mirrored_once_but_exact_feishu_return_is_suppressed(
+    tmp_path: Path,
+) -> None:
+    with RuntimeStorage(tmp_path / "runtime.db") as storage:
+        storage.initialize_runtime(sink_mode="outbound")
+        _prepare(storage)
+        storage.connection.execute(
+            "INSERT INTO dispatch_records(dispatch_attempt_id,ingress_message_id,thread_id,"
+            "client_user_message_id,profile_hash,binding_epoch,identity_binding_epoch,fencing_token,"
+            "server_epoch,connection_epoch,request_hash,state,turn_id,user_item_id,created_at,updated_at) "
+            "VALUES('attempt','ingress','thread','client','desktop-host-managed',1,1,1,"
+            "'server','connection','hash','accepted','turn','from-feishu',datetime('now'),datetime('now'))"
+        )
+        batch = RolloutBatch(
+            (
+                _event(
+                    EventKind.COMMENTARY,
+                    "from-feishu",
+                    "同一条飞书消息",
+                    source_type="user_message",
+                ),
+                _event(
+                    EventKind.COMMENTARY,
+                    "from-codex",
+                    "Codex 用户消息",
+                    source_type="user_message",
+                ),
+            ),
+            SourceCursor("source", "file", 100, "hash", "1"),
+        )
+        result = OutboundPipeline(storage).ingest_rollout_batch(batch)
+        assert result.inserted_items == 2 and result.queued_messages == 1
+        row = storage.connection.execute(
+            "SELECT item_id,body_json FROM provider_outbox"
+        ).fetchone()
+        assert row["item_id"] == "from-codex"
+        assert json.loads(row["body_json"])["text"].startswith("👤 Codex 用户消息")
+
+        repeated = OutboundPipeline(storage).ingest_rollout_batch(batch)
+        assert repeated.inserted_items == 0 and repeated.queued_messages == 0
 
 
 def test_runtime_outbox_completion_is_compare_and_swap(tmp_path: Path) -> None:
@@ -370,7 +419,7 @@ def test_runtime_v2_database_is_upgraded_without_rebinding(tmp_path: Path) -> No
         assert (row["active_chat_id"], row["conversation_mode"]) == ("legacy-chat", "p2p")
         assert storage.connection.execute(
             "SELECT value FROM runtime_metadata WHERE key='runtime_schema_version'"
-        ).fetchone()[0] == "10"
+        ).fetchone()[0] == "12"
         columns = {
             row[1]
             for row in storage.connection.execute("PRAGMA table_info(task_bindings)").fetchall()
@@ -382,6 +431,64 @@ def test_runtime_v2_database_is_upgraded_without_rebinding(tmp_path: Path) -> No
             "pending_title_hash",
             "title_revision",
         } <= columns
+        dispatch_columns = {
+            row[1]
+            for row in storage.connection.execute(
+                "PRAGMA table_info(dispatch_records)"
+            ).fetchall()
+        }
+        assert "user_item_id" in dispatch_columns
+
+
+def test_legacy_global_approval_request_id_is_migrated_to_connection_scope(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "legacy-approval.db"
+    with RuntimeStorage(path) as storage:
+        storage.initialize()
+        storage.execute_schema_migration(
+            """
+            CREATE TABLE approval_actions (
+                token_hash TEXT PRIMARY KEY,
+                approval_id TEXT UNIQUE NOT NULL,
+                server_request_id TEXT UNIQUE NOT NULL,
+                server_method TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                turn_id TEXT,
+                tenant_key TEXT NOT NULL,
+                app_id TEXT NOT NULL,
+                chat_id TEXT NOT NULL,
+                card_message_id TEXT NOT NULL,
+                operator_open_id TEXT NOT NULL,
+                binding_epoch INTEGER NOT NULL,
+                identity_binding_epoch INTEGER NOT NULL,
+                kill_generation INTEGER NOT NULL,
+                server_epoch TEXT NOT NULL,
+                connection_epoch TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                service_fencing_token INTEGER NOT NULL,
+                decision_map_json TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                consumed_decision TEXT,
+                consumed_at TEXT
+            );
+            INSERT INTO approval_actions VALUES(
+                'token','approval','0','method','thread',NULL,'tenant','app','chat','card',
+                'owner',1,1,1,'server-1','connection-1','session-1',1,'{}',
+                '2999-01-01T00:00:00Z',NULL,NULL
+            );
+            """
+        )
+        storage.initialize_runtime(sink_mode="control")
+        storage.connection.execute(
+            "INSERT INTO approval_actions VALUES("
+            "'token-2','approval-2','0','method','thread',NULL,'tenant','app','chat','card',"
+            "'owner',1,1,1,'server-2','connection-2','session-2',1,'{}',"
+            "'2999-01-01T00:00:00Z',NULL,NULL)"
+        )
+        assert storage.connection.execute(
+            "SELECT COUNT(*) FROM approval_actions WHERE server_request_id='0'"
+        ).fetchone()[0] == 2
 
 
 def test_local_markdown_image_is_uploaded_then_replied_in_task_topic(tmp_path: Path) -> None:

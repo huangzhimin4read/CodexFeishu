@@ -54,7 +54,7 @@ class CodexController:
             "thread/read", {"threadId": thread_id, "includeTurns": include_turns}
         )
 
-    def _require_dispatchable(
+    def require_dispatchable(
         self, thread_id: str, *, required_capability: str
     ) -> tuple[int, int, int]:
         task = self.storage.connection.execute(
@@ -104,6 +104,16 @@ class CodexController:
             ):
                 raise DispatchError("remote-input grant no longer matches the task binding")
         return int(task["current_binding_epoch"]), int(identity["binding_epoch"]), int(service["fencing_token"])
+
+    def _require_dispatchable(
+        self, thread_id: str, *, required_capability: str
+    ) -> tuple[int, int, int]:
+        """Compatibility alias for older callers and focused unit tests."""
+
+        return self.require_dispatchable(
+            thread_id,
+            required_capability=required_capability,
+        )
 
     def _managed_requirements(self, profile: ExecutionProfile) -> ManagedRequirements:
         result = self.connection.request("configRequirements/read", None)

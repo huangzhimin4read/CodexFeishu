@@ -108,8 +108,25 @@ class OutboundPipeline:
             raise RuntimeError("event thread is not opted in")
         if binding["anchor_state"] != "confirmed" or not binding["anchor_message_id"]:
             raise RuntimeError("task anchor is not confirmed")
+
+        # A Feishu message submitted through the desktop writer is persisted as
+        # a normal Codex user item. Suppress only that exact item when it comes
+        # back through rollout observation. Other user messages in the same
+        # turn (for example a Codex-originated steer) must still be mirrored.
+        if event.source_type == "user_message":
+            returning = connection.execute(
+                "SELECT 1 FROM dispatch_records WHERE thread_id=? AND turn_id=? "
+                "AND user_item_id=? AND state IN ('accepted','completed') LIMIT 1",
+                (event.thread_id, event.turn_id, event.item_id),
+            ).fetchone()
+            if returning is not None:
+                return 0
+
+        display_text = event.text
+        if event.source_type == "user_message":
+            display_text = f"👤 {display_text}" if display_text else "👤 用户图片"
         extracted = extract_local_images(
-            event.text, project_root=Path(str(binding["project_root"]))
+            display_text, project_root=Path(str(binding["project_root"]))
         )
         for index, reason in enumerate(extracted.failures, start=1):
             connection.execute(

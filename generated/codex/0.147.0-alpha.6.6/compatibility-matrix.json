@@ -1,0 +1,515 @@
+{
+  "approvalPolicy": {
+    "oneOf": [
+      {
+        "enum": [
+          "untrusted",
+          "on-request",
+          "never"
+        ],
+        "type": "string"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "granular": {
+            "properties": {
+              "mcp_elicitations": {
+                "type": "boolean"
+              },
+              "request_permissions": {
+                "default": false,
+                "type": "boolean"
+              },
+              "rules": {
+                "type": "boolean"
+              },
+              "sandbox_approval": {
+                "type": "boolean"
+              },
+              "skill_approval": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "mcp_elicitations",
+              "rules",
+              "sandbox_approval"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "granular"
+        ],
+        "title": "GranularAskForApproval",
+        "type": "object"
+      }
+    ]
+  },
+  "approvalsReviewer": {
+    "description": "Configures who approval requests are routed to for review. Examples include sandbox escapes, blocked network access, MCP approval prompts, and ARC escalations. Defaults to `user`. `auto_review` uses a carefully prompted subagent to gather relevant context and apply a risk-based decision framework before approving or denying the request. The legacy value `guardian_subagent` is accepted for compatibility.",
+    "enum": [
+      "user",
+      "auto_review",
+      "guardian_subagent"
+    ],
+    "type": "string"
+  },
+  "codexVersion": "0.147.0-alpha.6.6",
+  "experimentalProtocolSchemaSha256": "B8FF05B6F127C7D54D209D10E388530AA4AD271819A1899D91001E9E760EEFE9",
+  "initializeCapabilities": {
+    "experimental": [
+      "experimentalApi",
+      "mcpServerOpenaiFormElicitation",
+      "optOutNotificationMethods",
+      "requestAttestation"
+    ],
+    "stable": [
+      "experimentalApi",
+      "mcpServerOpenaiFormElicitation",
+      "optOutNotificationMethods",
+      "requestAttestation"
+    ]
+  },
+  "managedRequirementFields": [
+    "allowAppshots",
+    "allowLoginShell",
+    "allowManagedHooksOnly",
+    "allowRemoteControl",
+    "allowedApprovalPolicies",
+    "allowedPermissionProfiles",
+    "allowedSandboxModes",
+    "allowedWebSearchModes",
+    "allowedWindowsSandboxImplementations",
+    "browserUse",
+    "checkForUpdateOnStartup",
+    "computerUse",
+    "defaultPermissions",
+    "enforceResidency",
+    "featureRequirements",
+    "feedback",
+    "logDir",
+    "modelCatalogJson",
+    "models",
+    "sqliteHome",
+    "windowsSandboxPrivateDesktop"
+  ],
+  "methods": {
+    "ClientNotification": {
+      "experimentalOnly": [],
+      "stable": [
+        "initialized"
+      ]
+    },
+    "ClientRequest": {
+      "experimentalOnly": [
+        "collaborationMode/list",
+        "environment/add",
+        "environment/info",
+        "environment/status",
+        "fuzzyFileSearch/sessionStart",
+        "fuzzyFileSearch/sessionStop",
+        "fuzzyFileSearch/sessionUpdate",
+        "memory/reset",
+        "mock/experimentalMethod",
+        "plugin/search",
+        "process/kill",
+        "process/resizePty",
+        "process/spawn",
+        "process/writeStdin",
+        "remoteControl/client/list",
+        "remoteControl/client/revoke",
+        "remoteControl/disable",
+        "remoteControl/enable",
+        "remoteControl/pairing/start",
+        "remoteControl/pairing/status",
+        "remoteControl/status/read",
+        "thread/backgroundTerminals/clean",
+        "thread/backgroundTerminals/list",
+        "thread/backgroundTerminals/terminate",
+        "thread/decrement_elicitation",
+        "thread/increment_elicitation",
+        "thread/items/list",
+        "thread/memoryMode/set",
+        "thread/realtime/appendAudio",
+        "thread/realtime/appendSpeech",
+        "thread/realtime/appendText",
+        "thread/realtime/listVoices",
+        "thread/realtime/start",
+        "thread/realtime/stop",
+        "thread/search",
+        "thread/searchOccurrences",
+        "thread/settings/update",
+        "thread/turns/list"
+      ],
+      "stable": [
+        "account/login/cancel",
+        "account/login/start",
+        "account/logout",
+        "account/rateLimitResetCredit/consume",
+        "account/rateLimits/read",
+        "account/read",
+        "account/sendAddCreditsNudgeEmail",
+        "account/usage/read",
+        "account/workspaceMessages/read",
+        "app/installed",
+        "app/list",
+        "app/read",
+        "command/exec",
+        "command/exec/resize",
+        "command/exec/terminate",
+        "command/exec/write",
+        "config/batchWrite",
+        "config/mcpServer/reload",
+        "config/read",
+        "config/value/write",
+        "configRequirements/read",
+        "experimentalFeature/enablement/set",
+        "experimentalFeature/list",
+        "externalAgentConfig/detect",
+        "externalAgentConfig/import",
+        "externalAgentConfig/import/readHistories",
+        "externalAgentConfig/import/recordHistory",
+        "feedback/upload",
+        "fs/copy",
+        "fs/createDirectory",
+        "fs/getMetadata",
+        "fs/readDirectory",
+        "fs/readFile",
+        "fs/remove",
+        "fs/unwatch",
+        "fs/watch",
+        "fs/writeFile",
+        "fuzzyFileSearch",
+        "hooks/list",
+        "initialize",
+        "marketplace/add",
+        "marketplace/remove",
+        "marketplace/upgrade",
+        "mcpServer/oauth/login",
+        "mcpServer/resource/read",
+        "mcpServer/tool/call",
+        "mcpServerStatus/list",
+        "model/list",
+        "modelProvider/capabilities/read",
+        "permissionProfile/list",
+        "plugin/install",
+        "plugin/installed",
+        "plugin/list",
+        "plugin/read",
+        "plugin/share/checkout",
+        "plugin/share/delete",
+        "plugin/share/list",
+        "plugin/share/save",
+        "plugin/share/updateTargets",
+        "plugin/skill/read",
+        "plugin/uninstall",
+        "review/start",
+        "skills/config/write",
+        "skills/extraRoots/set",
+        "skills/list",
+        "thread/approveGuardianDeniedAction",
+        "thread/archive",
+        "thread/compact/start",
+        "thread/delete",
+        "thread/fork",
+        "thread/goal/clear",
+        "thread/goal/get",
+        "thread/goal/set",
+        "thread/inject_items",
+        "thread/list",
+        "thread/loaded/list",
+        "thread/metadata/update",
+        "thread/name/set",
+        "thread/read",
+        "thread/resume",
+        "thread/rollback",
+        "thread/section/move",
+        "thread/shellCommand",
+        "thread/start",
+        "thread/unarchive",
+        "thread/unsubscribe",
+        "threadSection/create",
+        "threadSection/delete",
+        "threadSection/list",
+        "threadSection/update",
+        "turn/interrupt",
+        "turn/start",
+        "turn/steer",
+        "windowsSandbox/readiness",
+        "windowsSandbox/setupStart"
+      ]
+    },
+    "ServerNotification": {
+      "experimentalOnly": [],
+      "stable": [
+        "account/login/completed",
+        "account/rateLimits/updated",
+        "account/updated",
+        "app/list/updated",
+        "command/exec/outputDelta",
+        "configWarning",
+        "deprecationNotice",
+        "error",
+        "externalAgentConfig/import/completed",
+        "externalAgentConfig/import/progress",
+        "fs/changed",
+        "fuzzyFileSearch/sessionCompleted",
+        "fuzzyFileSearch/sessionUpdated",
+        "guardianWarning",
+        "hook/completed",
+        "hook/started",
+        "item/agentMessage/delta",
+        "item/autoApprovalReview/completed",
+        "item/autoApprovalReview/started",
+        "item/commandExecution/outputDelta",
+        "item/commandExecution/terminalInteraction",
+        "item/completed",
+        "item/fileChange/outputDelta",
+        "item/fileChange/patchUpdated",
+        "item/mcpToolCall/progress",
+        "item/plan/delta",
+        "item/reasoning/summaryPartAdded",
+        "item/reasoning/summaryTextDelta",
+        "item/reasoning/textDelta",
+        "item/started",
+        "mcpServer/oauthLogin/completed",
+        "mcpServer/startupStatus/updated",
+        "model/rerouted",
+        "model/safetyBuffering/updated",
+        "model/verification",
+        "process/exited",
+        "process/outputDelta",
+        "remoteControl/status/changed",
+        "serverRequest/resolved",
+        "skills/changed",
+        "thread/archived",
+        "thread/closed",
+        "thread/compacted",
+        "thread/deleted",
+        "thread/environment/connected",
+        "thread/environment/disconnected",
+        "thread/goal/cleared",
+        "thread/goal/updated",
+        "thread/name/updated",
+        "thread/realtime/closed",
+        "thread/realtime/error",
+        "thread/realtime/itemAdded",
+        "thread/realtime/outputAudio/delta",
+        "thread/realtime/sdp",
+        "thread/realtime/started",
+        "thread/realtime/transcript/delta",
+        "thread/realtime/transcript/done",
+        "thread/settings/updated",
+        "thread/started",
+        "thread/status/changed",
+        "thread/tokenUsage/updated",
+        "thread/unarchived",
+        "turn/completed",
+        "turn/diff/updated",
+        "turn/moderationMetadata",
+        "turn/plan/updated",
+        "turn/started",
+        "warning",
+        "windows/worldWritableWarning",
+        "windowsSandbox/setupCompleted"
+      ]
+    },
+    "ServerRequest": {
+      "experimentalOnly": [
+        "currentTime/read"
+      ],
+      "stable": [
+        "account/chatgptAuthTokens/refresh",
+        "applyPatchApproval",
+        "attestation/generate",
+        "execCommandApproval",
+        "item/commandExecution/requestApproval",
+        "item/fileChange/requestApproval",
+        "item/permissions/requestApproval",
+        "item/tool/call",
+        "item/tool/requestUserInput",
+        "mcpServer/elicitation/request"
+      ]
+    }
+  },
+  "sandboxPolicy": {
+    "experimental": {
+      "dangerFullAccess": {
+        "additionalProperties": true,
+        "networkAccess": null,
+        "properties": [
+          "type"
+        ],
+        "required": [
+          "type"
+        ]
+      },
+      "externalSandbox": {
+        "additionalProperties": true,
+        "networkAccess": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/NetworkAccess"
+            }
+          ],
+          "default": "restricted"
+        },
+        "properties": [
+          "networkAccess",
+          "type"
+        ],
+        "required": [
+          "type"
+        ]
+      },
+      "readOnly": {
+        "additionalProperties": true,
+        "networkAccess": {
+          "default": false,
+          "type": "boolean"
+        },
+        "properties": [
+          "networkAccess",
+          "type"
+        ],
+        "required": [
+          "type"
+        ]
+      },
+      "workspaceWrite": {
+        "additionalProperties": true,
+        "networkAccess": {
+          "default": false,
+          "type": "boolean"
+        },
+        "properties": [
+          "excludeSlashTmp",
+          "excludeTmpdirEnvVar",
+          "networkAccess",
+          "type",
+          "writableRoots"
+        ],
+        "required": [
+          "type"
+        ]
+      }
+    },
+    "stable": {
+      "dangerFullAccess": {
+        "additionalProperties": true,
+        "networkAccess": null,
+        "properties": [
+          "type"
+        ],
+        "required": [
+          "type"
+        ]
+      },
+      "externalSandbox": {
+        "additionalProperties": true,
+        "networkAccess": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/NetworkAccess"
+            }
+          ],
+          "default": "restricted"
+        },
+        "properties": [
+          "networkAccess",
+          "type"
+        ],
+        "required": [
+          "type"
+        ]
+      },
+      "readOnly": {
+        "additionalProperties": true,
+        "networkAccess": {
+          "default": false,
+          "type": "boolean"
+        },
+        "properties": [
+          "networkAccess",
+          "type"
+        ],
+        "required": [
+          "type"
+        ]
+      },
+      "workspaceWrite": {
+        "additionalProperties": true,
+        "networkAccess": {
+          "default": false,
+          "type": "boolean"
+        },
+        "properties": [
+          "excludeSlashTmp",
+          "excludeTmpdirEnvVar",
+          "networkAccess",
+          "type",
+          "writableRoots"
+        ],
+        "required": [
+          "type"
+        ]
+      }
+    }
+  },
+  "selectedRequestFieldClassification": {
+    "item/commandExecution/requestApproval": {
+      "additionalPermissions": {
+        "experimental": true,
+        "experimentalSchemaPath": "CommandExecutionRequestApprovalParams.json",
+        "experimentalSchemaSha256": "94DC336210D981AB4DF0D998068F059FA6F409EA9B4E3E217046C7AA69B77EDF",
+        "field": "additionalPermissions",
+        "stable": false,
+        "stableSchemaPath": "CommandExecutionRequestApprovalParams.json",
+        "stableSchemaSha256": "4E47E8FDB5432C9A709377064B3BED28F0A491FEF4CA1E60EF3893DBBF98B9AD"
+      },
+      "availableDecisions": {
+        "experimental": true,
+        "experimentalSchemaPath": "CommandExecutionRequestApprovalParams.json",
+        "experimentalSchemaSha256": "94DC336210D981AB4DF0D998068F059FA6F409EA9B4E3E217046C7AA69B77EDF",
+        "field": "availableDecisions",
+        "stable": false,
+        "stableSchemaPath": "CommandExecutionRequestApprovalParams.json",
+        "stableSchemaSha256": "4E47E8FDB5432C9A709377064B3BED28F0A491FEF4CA1E60EF3893DBBF98B9AD"
+      }
+    },
+    "item/tool/requestUserInput": {
+      "methodStable": true
+    }
+  },
+  "stableProtocolSchemaSha256": "98A02E7ED08E78A1B1B878EB3B6D5A82E723CFF8218FA30B337F120B5E855D87",
+  "turnStartFields": {
+    "experimentalOnly": [
+      "additionalContext",
+      "collaborationMode",
+      "environments",
+      "multiAgentMode",
+      "permissions",
+      "responsesapiClientMetadata",
+      "runtimeWorkspaceRoots"
+    ],
+    "permissionsDescription": "Select a named permissions profile id for this turn and subsequent turns. Cannot be combined with `sandboxPolicy`.",
+    "stable": [
+      "approvalPolicy",
+      "approvalsReviewer",
+      "clientUserMessageId",
+      "cwd",
+      "effort",
+      "input",
+      "model",
+      "outputSchema",
+      "personality",
+      "sandboxPolicy",
+      "serviceTier",
+      "summary",
+      "threadId"
+    ]
+  }
+}

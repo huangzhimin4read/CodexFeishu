@@ -5,6 +5,7 @@ import pytest
 
 from codex_feishu_bridge.runtime_config import (
     ConversationMode,
+    RemoteDeliveryMode,
     RuntimeConfigurationError,
     RuntimeMode,
     load_runtime_config,
@@ -178,6 +179,16 @@ def test_full_remote_capabilities_require_topic_project_authority(tmp_path: Path
     assert config.remote.needs_control_plane
     assert config.remote.receives_messages
 
+    path.write_text(text.replace("approvals=true", "approvals=true\nauto_approve=true"), encoding="utf-8")
+    assert load_runtime_config(path).remote.auto_approve
+
+    path.write_text(
+        text.replace("approvals=true", "approvals=false\nauto_approve=true"),
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeConfigurationError, match="auto_approve requires"):
+        load_runtime_config(path)
+
     path.write_text(text.replace("files=true", "files=false").replace("images=true", "images=false")
                     .replace("text=true", "text=false").replace("approvals=true", "approvals=false")
                     .replace("controls=true", "controls=false"), encoding="utf-8")
@@ -201,3 +212,24 @@ def test_remote_capabilities_require_isolated_worker(tmp_path: Path) -> None:
     path.write_text(text, encoding="utf-8")
     with pytest.raises(RuntimeConfigurationError, match="separately-principalled"):
         load_runtime_config(path)
+
+
+def test_desktop_remote_delivery_uses_the_codex_app_writer_without_worker(tmp_path: Path) -> None:
+    executable = tmp_path / "codex.exe"
+    executable.write_bytes(b"fixture")
+    path = _write_config(tmp_path, executable)
+    text = path.read_text(encoding="utf-8").replace(
+        'p2p_chat_id="chat"',
+        'p2p_chat_id="chat"\nconversation_mode="topic_group"\ntopic_chat_id="topic-chat"',
+    )
+    text += (
+        '\n[codex_projects]\nenabled=true\nactivity_after_ms=1234567890\n'
+        'primary_project_id="project-1"\n'
+        '\n[remote]\nenabled=true\ntext=true\nimages=true\nfiles=true\n'
+        'approvals=true\ncontrols=true\nauto_approve=true\ndelivery="desktop"\n'
+    )
+    path.write_text(text, encoding="utf-8")
+    config = load_runtime_config(path)
+    assert config.remote.delivery is RemoteDeliveryMode.DESKTOP
+    assert config.remote.uses_desktop
+    assert config.worker_isolation is None

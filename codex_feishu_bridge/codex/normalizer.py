@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from hashlib import sha256
 from typing import Any
 
@@ -18,12 +19,27 @@ class UnsupportedRolloutVersion(RolloutRecordError):
 
 
 class RolloutNormalizer:
-    """Converts only explicit user-visible assistant messages.
+    """Converts explicit user-visible assistant and user messages.
 
     Unknown record types are ignored. Assistant messages with an unknown phase
     fail closed because treating them as commentary or final would be a content
-    classification guess.
+    classification guess. User attachment wrappers are reduced to the request
+    plus path-free attachment labels.
     """
+
+    _USER_REQUEST_MARKER = "\n## My request:\n"
+    _ATTACHED_FILE = re.compile(r"^## ([^:\r\n]+): [^\r\n]+$", re.MULTILINE)
+    _IMAGE_REFERENCE = re.compile(
+        r'<image\s+name=.*?\s+path="[^"]+">\s*', re.IGNORECASE
+    )
+    _CODEX_DELEGATION = re.compile(
+        r"\A<codex_delegation>\s*"
+        r"<source_thread_id>[0-9a-fA-F-]{36}</source_thread_id>\s*"
+        r"<input>(?P<input>.*)</input>\s*"
+        r"</codex_delegation>\Z",
+        re.DOTALL,
+    )
+    _IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"})
 
     def __init__(self, supported_versions: frozenset[str] | None = None) -> None:
         self.supported_versions = supported_versions or frozenset({"1"})
@@ -70,7 +86,22 @@ class RolloutNormalizer:
             )
         if payload.get("type") != "message":
             return None
-        if payload.get("role") != "assistant":
+        role = payload.get("role")
+        if role == "user":
+            content = payload.get("content")
+            images = self._extract_content_images(content)
+            text = self._extract_user_text(content, has_images=bool(images))
+            if not text and not images:
+                return None
+            return self._event(
+                record,
+                payload,
+                EventKind.COMMENTARY,
+                text,
+                "user_message",
+                images,
+            )
+        if role != "assistant":
             return None
         phase = payload.get("phase")
         kind = self._kind_from_phase(phase)
@@ -123,6 +154,46 @@ class RolloutNormalizer:
             if isinstance(text, str):
                 pieces.append(text)
         return "".join(pieces)
+
+    @classmethod
+    def _extract_user_text(cls, content: Any, *, has_images: bool) -> str:
+        if not isinstance(content, list):
+            return ""
+        pieces = [
+            part.get("text")
+            for part in content
+            if isinstance(part, dict)
+            and part.get("type") == "input_text"
+            and isinstance(part.get("text"), str)
+        ]
+        raw = "".join(pieces)
+        attached_names: list[str] = []
+        if cls._USER_REQUEST_MARKER in raw:
+            preamble, raw = raw.rsplit(cls._USER_REQUEST_MARKER, 1)
+            attached_names = cls._ATTACHED_FILE.findall(preamble)
+        raw = cls._IMAGE_REFERENCE.sub("", raw).strip("\r\n")
+        if raw.startswith("<codex_delegation>"):
+            delegation = cls._CODEX_DELEGATION.fullmatch(raw)
+            if delegation is None:
+                # A malformed internal envelope must not leak task identifiers
+                # or routing metadata into Feishu.
+                return ""
+            raw = delegation.group("input").strip("\r\n")
+        labels: list[str] = []
+        seen: set[str] = set()
+        for attached_name in attached_names:
+            safe_name = attached_name.replace("\\", "/").rsplit("/", 1)[-1].strip()
+            if not safe_name or safe_name in seen:
+                continue
+            seen.add(safe_name)
+            suffix = "." + safe_name.rsplit(".", 1)[-1].casefold() if "." in safe_name else ""
+            if has_images and suffix in cls._IMAGE_SUFFIXES:
+                continue
+            labels.append(f"📎【{safe_name}】")
+        if labels:
+            label_text = "\n".join(labels)
+            raw = f"{raw}\n\n{label_text}" if raw else label_text
+        return raw
 
     @staticmethod
     def _extract_content_images(content: Any) -> tuple[EmbeddedImage, ...]:

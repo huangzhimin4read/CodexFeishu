@@ -1,0 +1,102 @@
+---
+name: manage-codex-feishu
+description: Operate, verify, deploy, restart, or diagnose the owner-only Windows bridge between Codex desktop tasks and Feishu topics. Use for CodexFeishu service health, Feishu-to-Codex delivery, Codex-to-Feishu mirroring, exact return-path deduplication, topic routing, attachments, receipts, remote commands, or scheduled-task recovery.
+---
+
+# Manage Codex Feishu
+
+Operate the always-on CodexFeishu bridge conservatively and verify delivery from durable evidence. Keep the Windows scheduled service as the message transport; this skill is its management surface, not a replacement daemon.
+
+## Locate the repository
+
+Use, in order:
+
+1. A repository path explicitly supplied by the user.
+2. The current workspace when `pyproject.toml` declares `name = "codex-feishu-bridge"`.
+3. `CODEX_FEISHU_REPOSITORY` when it resolves to that project.
+
+Do not scan arbitrary drives. Treat `.runtime/live-remote.toml`, tenant exports, tokens, application secrets, chat IDs, open IDs, and task IDs as private. Never print or commit them.
+
+## Start with read-only status
+
+Run the bundled script before changing the installation:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/status.ps1 -RepositoryRoot <repo>
+```
+
+The bridge is healthy only when all of these are true:
+
+- Scheduled task `CodexFeishu-Broker-Owner` is running.
+- The recorded service PID is alive.
+- `.runtime/topic-group-status.json` is fresh.
+- `process_state` is `running`.
+- `remote_connection_state` is `connected`.
+- No circuit breaker is open and no dead letter is pending.
+
+Report failed conditions individually. Do not expose identifiers or message bodies in status output.
+
+## Verify the code
+
+Before deployment, run from the repository:
+
+```powershell
+python -m pytest -q
+python -m compileall -q codex_feishu_bridge
+python -m codex_feishu_bridge verify-config --config .runtime/live-remote.toml
+python -m codex_feishu_bridge preflight --config .runtime/live-remote.toml --live
+```
+
+If the private live config is absent, run the public test and compile checks and state that live preflight was not performed. Also scan tracked changes for credentials, real tenant identifiers, and local absolute paths in public documentation.
+
+## Deploy or restart
+
+Only deploy or restart when the user requested repair, deployment, installation, or a change that requires activation.
+
+1. Record the current task state, PID, health snapshot, and deployed code hashes.
+2. Back up the installed application directory to a timestamped directory under `C:\ProgramData\CodexFeishuBridge\backups`.
+3. Stop the exact scheduled task.
+4. Stop only processes whose command line names the exact live config path. Never kill Python or Codex processes broadly.
+5. Stage the locked dependencies and copy the bridge package and supervisor scripts.
+6. Install or start the supervisor task.
+7. Require a new supervisor PID, a new worker PID, fresh health, and a connected Feishu long connection.
+8. Re-run `scripts/status.ps1` and relevant tests.
+
+Preserve the private configuration and credentials. Do not delete backups automatically.
+
+## Prove delivery end to end
+
+Use a new unique message for each direction and report evidence, not just UI impressions.
+
+For Feishu to Codex, require:
+
+- A new ingress row for the Feishu message.
+- An accepted desktop-dispatch record containing the target Codex task, turn ID, and user-item ID.
+- The same user item visible in the Codex task reader or rollout record.
+
+For Codex to Feishu, require:
+
+- A normalized Codex `user_message` item.
+- Exactly one confirmed provider-outbox delivery for that item.
+- No desktop-dispatch record for a Codex-origin user item.
+
+For a message injected from Feishu, verify the exact return item is suppressed by `task + turn + user item` identity. Do not deduplicate by body text: an independently authored identical message must still deliver.
+
+## Preserve product boundaries
+
+- Create or rename a Feishu project group only after that Codex project becomes active and no mapped group exists.
+- Keep one Feishu topic per Codex task and use the visible task name plus project name; omit internal task IDs, hashes, citation XML, and local file paths.
+- Render links and file citations as path-free visible labels. Upload accessible local images/files instead of exposing their paths.
+- Keep remote text, images, files, approvals, and control commands behind the configured owner-only authorization and audit policy.
+- Do not confuse content-level approval messages with Codex permission prompts. Actual prompts for desktop-owned turns follow that Codex task's permission profile.
+- Do not claim delivery merely because Feishu accepted an event or the bridge accepted a queue item. Distinguish submitted to Codex, visible in Codex, sent to Feishu, and confirmed by Feishu.
+
+## Public release checks
+
+Before committing or publishing:
+
+- Keep `.runtime/live-remote.toml`, databases, logs, screenshots, tenant exports, and credentials ignored.
+- Maintain matching English and Chinese user documentation.
+- Validate this skill and the plugin manifest with the bundled skill/plugin validators.
+- Run `git diff --check`, the full test suite, and a tracked-content secret/identifier scan.
+- Commit intentionally and verify the remote commit after pushing.

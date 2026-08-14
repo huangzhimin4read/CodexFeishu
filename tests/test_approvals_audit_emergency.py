@@ -1,4 +1,5 @@
 from pathlib import Path
+from dataclasses import replace
 
 import pytest
 
@@ -143,6 +144,53 @@ def test_approval_from_previous_service_session_cannot_be_consumed(tmp_path: Pat
         assert storage.connection.execute(
             "SELECT consumed_at FROM approval_actions"
         ).fetchone()[0] is None
+
+
+def test_approval_request_ids_are_idempotent_per_connection_and_reusable_after_reconnect(
+    tmp_path: Path,
+) -> None:
+    with RuntimeStorage(tmp_path / "db.sqlite") as storage:
+        storage.initialize_runtime(sink_mode="control")
+        broker = ApprovalBroker(storage, b"b" * 32)
+        first = broker.issue(
+            context=context(), request={"x": 1}, decision_map={"accept": {"decision": "accept"}}
+        )
+        duplicate = broker.issue(
+            context=context(), request={"x": 1}, decision_map={"accept": {"decision": "accept"}}
+        )
+        reconnected = broker.issue(
+            context=replace(
+                context(),
+                approval_id="approval-after-reconnect",
+                server_epoch="server-2",
+                connection_epoch="connection-2",
+                session_id="session-2",
+            ),
+            request={"x": 1},
+            decision_map={"accept": {"decision": "accept"}},
+        )
+
+        assert first.created and first.opaque_token
+        assert not duplicate.created and duplicate.opaque_token is None
+        assert reconnected.created and reconnected.opaque_token
+        assert storage.connection.execute(
+            "SELECT COUNT(*) FROM approval_actions WHERE server_request_id='7'"
+        ).fetchone()[0] == 2
+
+
+def test_approval_request_id_content_conflict_fails_closed(tmp_path: Path) -> None:
+    with RuntimeStorage(tmp_path / "db.sqlite") as storage:
+        storage.initialize_runtime(sink_mode="control")
+        broker = ApprovalBroker(storage, b"b" * 32)
+        broker.issue(
+            context=context(), request={"x": 1}, decision_map={"accept": {"decision": "accept"}}
+        )
+        with pytest.raises(ApprovalError, match="reused with different content"):
+            broker.issue(
+                context=context(),
+                request={"x": 2},
+                decision_map={"accept": {"decision": "accept"}},
+            )
 
 
 def test_audit_chain_rejects_body_fields_and_detects_tamper(tmp_path: Path) -> None:
