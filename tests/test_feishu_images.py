@@ -62,3 +62,30 @@ def test_two_adjacent_local_images_are_captured_independently(tmp_path: Path) ->
     assert [image.file_name for image in result.images] == [front.name, rear.name]
     assert result.text == "正面与对面侧板：\n\n[图片：正面侧板]\n\n[图片：对面侧板]"
     assert front.as_posix() not in result.text and rear.as_posix() not in result.text
+
+
+def test_valid_image_magic_corrects_a_misleading_known_suffix(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    image = project / "camera-export.png"
+    image.write_bytes(b"\xff\xd8\xff\xe0fixture")
+
+    result = extract_local_images(f"![相机照片]({image.as_posix()})", project_root=project)
+
+    assert result.failures == ()
+    assert len(result.images) == 1
+    assert result.images[0].mime_type == "image/jpeg"
+    assert result.images[0].file_name == "camera-export.jpg"
+    assert result.text == "[图片：相机照片]"
+
+
+def test_non_image_json_brackets_with_backslashes_remain_plain_text(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    source = "![not-an-image " + (r"C:\\folder\\file" * 400) + "]"
+
+    result = extract_local_images(source, project_root=project)
+
+    assert result.text == source
+    assert result.images == ()
+    assert result.failures == ()

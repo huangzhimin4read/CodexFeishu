@@ -44,6 +44,24 @@ def test_markdown_link_keeps_label_and_hides_destination() -> None:
     assert "D:/" not in visible and "handoff.md" not in visible
 
 
+def test_markdown_link_parser_handles_escaped_labels_and_nested_targets() -> None:
+    source = r"请查看 [A\[B\]\\C](https://example.test/a_(b)/c) 和 ![预览](image.png)。"
+    visible = provider_visible_text(source)
+    assert visible == "请查看 🔗【A[B]\\C】 和 ![预览](image.png)。"
+
+
+def test_json_like_bracket_text_with_many_backslashes_is_not_treated_as_a_link() -> None:
+    # This shape previously caused exponential regex backtracking because the
+    # escaped-character and ordinary-label alternatives both consumed '\\'.
+    source = '<tool-output>{"paths":["C:' + (r"\\folder" * 400) + '"]}</tool-output>'
+    assert provider_visible_text(source) == source
+
+
+def test_unclosed_markdown_target_is_preserved() -> None:
+    source = "保留 [未闭合](target(with nesting)\n下一行"
+    assert provider_visible_text(source) == source
+
+
 def test_codex_file_citation_keeps_link_symbol_and_file_name_only() -> None:
     source = (
         '最新版加工 PDF：:codex-file-citation{path="C:/Projects/example/'

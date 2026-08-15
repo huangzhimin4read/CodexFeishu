@@ -630,10 +630,11 @@ class BridgeService:
                 thread_id: frozenset(turn_ids)
                 for thread_id, turn_ids in active_rollout_turns.items()
             }
-            if self.outbox_worker is not None:
-                for _ in range(20):
-                    if not self.outbox_worker.run_once():
-                        break
+            # Publish liveness before provider delivery. A cold start can
+            # discover a large durable backlog, and twenty rate-limited sends
+            # may take longer than the supervisor's stale-health threshold.
+            self._write_status()
+            self._drain_outbox()
             if self.client is not None:
                 reconciler = SendReconciler(self.storage, self.client)
                 unknown = self.storage.connection.execute(
@@ -655,7 +656,6 @@ class BridgeService:
             if self.ingress is not None and self.controller is not None:
                 self._process_ingress()
             self._expire_payloads()
-            self._write_status()
             now = time.monotonic()
             if self.provisioning is not None and now - last_preflight >= 300:
                 result = self.provisioning.run(live=True, remote=self.config.remote)
@@ -669,6 +669,15 @@ class BridgeService:
                 self.pilot.sample()
                 last_pilot_sample = now
             self.stop_event.wait(0.25)
+
+    def _drain_outbox(self) -> None:
+        if self.outbox_worker is None:
+            return
+        for index in range(20):
+            if not self.outbox_worker.run_once():
+                break
+            if (index + 1) % 5 == 0:
+                self._write_status()
 
     def _ensure_task_bindings(self, sources: tuple[Any, ...]) -> None:
         assert self.config.feishu is not None

@@ -21,11 +21,6 @@ _CODEX_FILE_CITATION = re.compile(
     r'(?:\s+purpose="[^"\r\n]*")?\s*\}',
     re.IGNORECASE,
 )
-_MARKDOWN_LINK = re.compile(
-    r"(?<!!)\[(?P<label>(?:\\.|[^\]])+)\]\("
-    r"(?P<target><[^>\r\n]+>|(?:\\.|[^()\r\n])*(?:\((?:\\.|[^()\r\n])*\)(?:\\.|[^()\r\n])*)*)"
-    r"\)"
-)
 _TAG_BASE = 0xE0000
 _TAG_CANCEL = chr(0xE007F)
 
@@ -53,6 +48,104 @@ def redact_text(text: str) -> str:
     return value
 
 
+def _markdown_target_end(text: str, start: int) -> tuple[int | None, int]:
+    """Return a link target's exclusive end and the next safe scan position.
+
+    This parser is deliberately deterministic.  The previous regular
+    expression had overlapping alternatives for backslashes, so JSON-like
+    content containing ``[...\\... ]`` without a following link target could
+    trigger catastrophic backtracking and pin the bridge worker indefinitely.
+    """
+
+    length = len(text)
+    if start < length and text[start] == "<":
+        cursor = start + 1
+        while cursor < length and text[cursor] not in ">\r\n":
+            cursor += 1
+        if (
+            cursor > start + 1
+            and cursor < length
+            and text[cursor] == ">"
+            and cursor + 1 < length
+            and text[cursor + 1] == ")"
+        ):
+            return cursor + 2, cursor + 2
+        return None, min(length, cursor + 1)
+
+    depth = 1
+    cursor = start
+    while cursor < length:
+        character = text[cursor]
+        if character in "\r\n":
+            return None, cursor + 1
+        if character == "\\":
+            if cursor + 1 >= length or text[cursor + 1] in "\r\n":
+                return None, min(length, cursor + 2)
+            cursor += 2
+            continue
+        if character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+            if depth == 0:
+                return cursor + 1, cursor + 1
+        cursor += 1
+    return None, length
+
+
+def _replace_markdown_links(text: str) -> str:
+    """Hide Markdown destinations in one bounded, left-to-right scan."""
+
+    replacements: list[tuple[int, int, str]] = []
+    open_labels: list[tuple[int, bool]] = []
+    cursor = 0
+    length = len(text)
+    while cursor < length:
+        character = text[cursor]
+        if character == "\\" and cursor + 1 < length:
+            cursor += 2
+            continue
+        if character == "[":
+            open_labels.append((cursor, cursor == 0 or text[cursor - 1] != "!"))
+            cursor += 1
+            continue
+        if character != "]":
+            cursor += 1
+            continue
+
+        candidate = open_labels[-1] if open_labels else None
+        # An unescaped closing bracket prevents every older opening bracket
+        # from being a valid label boundary, whether this candidate is a link
+        # or ordinary bracketed text.
+        open_labels.clear()
+        if candidate is None or not candidate[1] or cursor + 1 >= length or text[cursor + 1] != "(":
+            cursor += 1
+            continue
+        label_start = candidate[0] + 1
+        if label_start == cursor:
+            cursor += 1
+            continue
+        target_end, resume_at = _markdown_target_end(text, cursor + 2)
+        if target_end is None:
+            cursor = max(cursor + 1, resume_at)
+            continue
+        raw_label = text[label_start:cursor]
+        label = re.sub(r"\\([\\\[\]])", r"\1", raw_label).strip()
+        replacements.append((candidate[0], target_end, f"🔗【{label or '链接'}】"))
+        cursor = target_end
+
+    if not replacements:
+        return text
+    pieces: list[str] = []
+    copied_to = 0
+    for start, end, replacement in replacements:
+        pieces.append(text[copied_to:start])
+        pieces.append(replacement)
+        copied_to = end
+    pieces.append(text[copied_to:])
+    return "".join(pieces)
+
+
 def provider_visible_text(text: str) -> str:
     """Remove machine metadata and hide local/link destinations."""
 
@@ -66,11 +159,7 @@ def provider_visible_text(text: str) -> str:
 
     value = _CODEX_FILE_CITATION.sub(replace_file_citation, value)
 
-    def replace_link(match: re.Match[str]) -> str:
-        label = re.sub(r"\\([\\\[\]])", r"\1", match.group("label")).strip()
-        return f"🔗【{label or '链接'}】"
-
-    value = _MARKDOWN_LINK.sub(replace_link, value)
+    value = _replace_markdown_links(value)
     value = re.sub(r"[ \t]+\n", "\n", value)
     value = re.sub(r"\n{3,}", "\n\n", value)
     return value.strip()

@@ -808,6 +808,49 @@ def test_local_markdown_image_is_uploaded_then_replied_in_task_topic(tmp_path: P
         ).fetchone()[0] == 0
 
 
+def test_local_image_can_be_recovered_idempotently_after_content_is_corrected(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    image = project / "camera-export.png"
+    image.write_bytes(b"not-an-image")
+    event = _event(
+        EventKind.FINAL_ANSWER,
+        "recover-image",
+        f"结果\n![照片](<{image}>)",
+    )
+    with RuntimeStorage(tmp_path / "runtime.db") as storage:
+        storage.initialize_runtime(sink_mode="outbound")
+        storage.connection.execute(
+            "INSERT INTO task_bindings(thread_id,project_root,chat_id,anchor_message_id,anchor_state,"
+            "anchor_uuid,anchor_marker,conversation_mode,opted_in,updated_at) "
+            "VALUES('thread',?,'chat','anchor','confirmed','uuid','marker','topic_group',1,?)",
+            (str(project), utc_now()),
+        )
+        batch = RolloutBatch(
+            (event,),
+            SourceCursor("source", "file", 100, "hash", "1"),
+        )
+        first = OutboundPipeline(storage).ingest_rollout_batch(batch)
+        assert first.queued_messages == 2
+        assert storage.connection.execute("SELECT COUNT(*) FROM dead_letters").fetchone()[0] == 1
+        assert storage.connection.execute("SELECT COUNT(*) FROM outbound_images").fetchone()[0] == 0
+
+        image.write_bytes(b"\xff\xd8\xff\xe0fixture")
+        pipeline = OutboundPipeline(storage)
+        with storage.immediate() as connection:
+            recovered = pipeline._enqueue_event(connection, event)
+
+        assert recovered == 1
+        assert storage.connection.execute("SELECT COUNT(*) FROM provider_outbox").fetchone()[0] == 3
+        stored = storage.connection.execute(
+            "SELECT file_name,mime_type,content FROM outbound_images"
+        ).fetchone()
+        assert tuple(stored[:2]) == ("camera-export.jpg", "image/jpeg")
+        assert bytes(stored["content"]) == image.read_bytes()
+
+
 def test_final_markdown_image_is_resent_after_matching_commentary_image(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()

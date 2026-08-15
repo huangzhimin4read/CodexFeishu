@@ -10,7 +10,13 @@ param(
     [ValidateRange(5, 3600)]
     [int]$RestartDelaySeconds = 60,
     [ValidateRange(1, 9999)]
-    [int]$MaxRestartAttempts = 999
+    [int]$MaxRestartAttempts = 999,
+    [ValidateRange(1, 3600)]
+    [int]$StartupGraceSeconds = 120,
+    [ValidateRange(1, 3600)]
+    [int]$HealthStaleSeconds = 120,
+    [ValidateRange(1, 60)]
+    [int]$HealthPollSeconds = 5
 )
 
 $ErrorActionPreference = 'Stop'
@@ -34,10 +40,13 @@ if (-not (Test-Path -LiteralPath $runtime -PathType Container)) {
 
 $launchPath = Join-Path $runtime 'remote-service-launch.json'
 $pidPath = Join-Path $runtime 'topic-group-service.pid'
+$healthPath = Join-Path $runtime 'topic-group-status.json'
+$watchdogPath = Join-Path $runtime 'broker-supervisor-last-watchdog.json'
 $restartAttempt = 0
 
 while ($true) {
     $child = $null
+    $watchdogReason = $null
     $stamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssfffZ')
     $stdout = Join-Path $runtime "remote-service-supervised-$stamp.stdout.log"
     $stderr = Join-Path $runtime "remote-service-supervised-$stamp.stderr.log"
@@ -74,16 +83,62 @@ while ($true) {
             [System.Text.UTF8Encoding]::new($false)
         )
 
+        $childStartedAt = [DateTime]::UtcNow
+        while (-not $child.HasExited) {
+            Start-Sleep -Seconds $HealthPollSeconds
+            if ($child.HasExited) { break }
+            $now = [DateTime]::UtcNow
+            if (($now - $childStartedAt).TotalSeconds -lt $StartupGraceSeconds) {
+                continue
+            }
+            $health = Get-Item -LiteralPath $healthPath -ErrorAction SilentlyContinue
+            $healthAgeSeconds = $null
+            if ($null -eq $health) {
+                $watchdogReason = 'health_missing'
+            } else {
+                $healthAgeSeconds = [Math]::Round(($now - $health.LastWriteTimeUtc).TotalSeconds, 3)
+                if ($healthAgeSeconds -gt $HealthStaleSeconds) {
+                    $watchdogReason = 'health_stale'
+                }
+            }
+            if ($null -eq $watchdogReason) { continue }
+
+            $watchdog = [ordered]@{
+                detected_at = $now.ToString('o')
+                supervisor_task = $TaskName
+                process_id = $child.Id
+                reason = $watchdogReason
+                startup_grace_seconds = $StartupGraceSeconds
+                health_stale_seconds = $HealthStaleSeconds
+                health_age_seconds = $healthAgeSeconds
+                last_health_write_at = if ($null -ne $health) { $health.LastWriteTimeUtc.ToString('o') } else { $null }
+            }
+            [System.IO.File]::WriteAllText(
+                $watchdogPath,
+                ($watchdog | ConvertTo-Json -Compress) + "`n",
+                [System.Text.UTF8Encoding]::new($false)
+            )
+            try {
+                Stop-Process -Id $child.Id -Force -ErrorAction Stop
+            }
+            catch {
+                if (-not $child.HasExited) { throw }
+            }
+            break
+        }
         $child.WaitForExit()
         $exitCode = $child.ExitCode
         $launch.ended_at = (Get-Date).ToUniversalTime().ToString('o')
         $launch.exit_code = $exitCode
+        if ($null -ne $watchdogReason) {
+            $launch.watchdog_reason = $watchdogReason
+        }
         [System.IO.File]::WriteAllText(
             $launchPath,
             ($launch | ConvertTo-Json -Compress) + "`n",
             [System.Text.UTF8Encoding]::new($false)
         )
-        if ($exitCode -eq 0) { exit 0 }
+        if ($exitCode -eq 0 -and $null -eq $watchdogReason) { exit 0 }
     }
     catch {
         $failure = [ordered]@{
@@ -108,6 +163,7 @@ while ($true) {
         restart_delay_seconds = $RestartDelaySeconds
         previous_process_id = if ($null -ne $child) { $child.Id } else { $null }
         previous_exit_code = if ($null -ne $child -and $child.HasExited) { $child.ExitCode } else { $null }
+        watchdog_reason = $watchdogReason
     }
     [System.IO.File]::WriteAllText(
         (Join-Path $runtime 'broker-supervisor-last-restart.json'),

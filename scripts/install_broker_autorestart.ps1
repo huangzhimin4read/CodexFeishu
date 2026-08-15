@@ -77,7 +77,10 @@ function Quote-TaskArgument([string]$Value) {
     return '"' + $Value.Replace('"', '""') + '"'
 }
 
-$powerShell = Join-Path $PSHOME 'powershell.exe'
+$powerShell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+if (-not (Test-Path -LiteralPath $powerShell -PathType Leaf)) {
+    throw "Stable Windows PowerShell executable is missing: $powerShell"
+}
 $arguments = @(
     '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
     '-WindowStyle', 'Hidden', '-File', (Quote-TaskArgument $runner),
@@ -102,7 +105,7 @@ $settings = New-ScheduledTaskSettingsSet `
     -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -Hidden
 $definition = New-ScheduledTask -Action $action -Trigger @($trigger, $watchdogTrigger) `
     -Principal $principal -Settings $settings `
-    -Description 'Owner-only Codex Feishu Broker; restart after nonzero exit.'
+    -Description 'Owner-only Codex Feishu/Lark Broker; restart after exit or stale health.'
 Register-ScheduledTask -TaskName $TaskName -InputObject $definition -Force | Out-Null
 
 $xml = Export-ScheduledTask -TaskName $TaskName

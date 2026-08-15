@@ -222,6 +222,7 @@ class OutboundPipeline:
                 separators=(",", ":"),
             )
             units.append((logical_id, "text", marker, body_json, None))
+        queued_units = 0
         for index, (logical_id, message_type, marker, body_json, image) in enumerate(
             units, start=1
         ):
@@ -236,11 +237,12 @@ class OutboundPipeline:
                 if image is not None
                 else sha256(body_json.encode("utf-8")).hexdigest()
             )
-            connection.execute(
+            inserted = connection.execute(
                 "INSERT INTO provider_outbox(logical_message_id,thread_id,turn_id,item_id,operation,"
                 "message_type,endpoint_name,target_message_id,reply_in_thread,stable_uuid,marker,body_json,body_hash,"
                 "priority,state,next_attempt_at,created_at,updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(logical_message_id) DO NOTHING",
                 (
                     logical_id,
                     event.thread_id,
@@ -266,6 +268,9 @@ class OutboundPipeline:
                     now,
                 ),
             )
+            if inserted.rowcount != 1:
+                continue
+            queued_units += 1
             if image is not None:
                 outbox_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
                 connection.execute(
@@ -281,7 +286,7 @@ class OutboundPipeline:
                         now,
                     ),
                 )
-        return len(units)
+        return queued_units
 
     @staticmethod
     def _reconcile_delayed_desktop_return(

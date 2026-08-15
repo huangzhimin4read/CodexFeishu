@@ -8,15 +8,16 @@ from hashlib import sha256
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from ..image_content import MAX_IMAGE_BYTES, mime_for_suffix, validate_image_magic
-from ..security.windows_paths import PathValidationError, capture_path_identity, revalidate
-
-
-_MARKDOWN_IMAGE = re.compile(
-    r"!\[(?P<alt>(?:\\.|[^\]])*)\]\("
-    r"(?P<target><[^>\r\n]+>|(?:\\.|[^()\r\n])*(?:\((?:\\.|[^()\r\n])*\)(?:\\.|[^()\r\n])*)*)"
-    r"\)"
+from ..image_content import (
+    MAX_IMAGE_BYTES,
+    detect_image_type,
+    mime_for_suffix,
+    validate_image_magic,
 )
+from ..security.windows_paths import PathValidationError, capture_path_identity, revalidate
+from .formatter import _markdown_target_end
+
+
 @dataclass(frozen=True, slots=True)
 class LocalImage:
     label: str
@@ -32,6 +33,50 @@ class ImageExtraction:
     text: str
     images: tuple[LocalImage, ...]
     failures: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _MarkdownImage:
+    start: int
+    end: int
+    alt: str
+    target: str
+    raw: str
+
+
+def _markdown_images(text: str) -> tuple[_MarkdownImage, ...]:
+    """Parse image references without regex backtracking on JSON-like text."""
+
+    found: list[_MarkdownImage] = []
+    cursor = 0
+    length = len(text)
+    while cursor < length:
+        start = text.find("![", cursor)
+        if start < 0:
+            break
+        label_start = start + 2
+        close = label_start
+        while close < length:
+            if text[close] == "\\" and close + 1 < length:
+                close += 2
+                continue
+            if text[close] == "]":
+                break
+            close += 1
+        if close >= length:
+            break
+        if close + 1 >= length or text[close + 1] != "(":
+            cursor = close + 1
+            continue
+        end, resume_at = _markdown_target_end(text, close + 2)
+        if end is None:
+            cursor = max(close + 1, resume_at)
+            continue
+        raw_alt = text[label_start:close]
+        alt = re.sub(r"\\([\\\[\]])", r"\1", raw_alt).strip()
+        found.append(_MarkdownImage(start, end, alt, text[close + 2 : end - 1], text[start:end]))
+        cursor = end
+    return tuple(found)
 
 
 def _local_target(target: str, project_root: Path) -> Path | None:
@@ -57,8 +102,8 @@ def _local_target(target: str, project_root: Path) -> Path | None:
 
 def _read_local_image(candidate: Path, project_root: Path, label: str) -> LocalImage:
     suffix = candidate.suffix.lower()
-    mime_type = mime_for_suffix(suffix)
-    if mime_type is None:
+    declared_mime_type = mime_for_suffix(suffix)
+    if declared_mime_type is None:
         raise ValueError("unsupported_format")
     identity = capture_path_identity(str(candidate), (project_root,))
     if identity.missing_suffix or not identity.canonical_path.is_file():
@@ -75,12 +120,19 @@ def _read_local_image(candidate: Path, project_root: Path, label: str) -> LocalI
     revalidate(identity, (project_root,))
     if len(content) != size:
         raise ValueError("file_changed_during_read")
-    if not validate_image_magic(content, suffix):
-        raise ValueError("content_format_mismatch")
+    if validate_image_magic(content, suffix):
+        mime_type = declared_mime_type
+        file_name = identity.canonical_path.name
+    else:
+        detected = detect_image_type(content)
+        if detected is None:
+            raise ValueError("content_format_mismatch")
+        mime_type, detected_suffix = detected
+        file_name = identity.canonical_path.stem + detected_suffix
     return LocalImage(
         label=label,
         source_path=str(identity.canonical_path),
-        file_name=identity.canonical_path.name,
+        file_name=file_name,
         mime_type=mime_type,
         content=content,
         content_hash=sha256(content).hexdigest(),
@@ -98,14 +150,14 @@ def extract_local_images(text: str, *, project_root: Path) -> ImageExtraction:
     failures: list[str] = []
     pieces: list[str] = []
     position = 0
-    for match in _MARKDOWN_IMAGE.finditer(text):
-        pieces.append(text[position : match.start()])
-        alt = match.group("alt").replace(r"\]", "]").strip()
-        target = match.group("target")
+    for match in _markdown_images(text):
+        pieces.append(text[position : match.start])
+        alt = match.alt
+        target = match.target
         try:
             candidate = _local_target(target, project_root)
             if candidate is None:
-                pieces.append(match.group(0))
+                pieces.append(match.raw)
             else:
                 image = _read_local_image(candidate, project_root.resolve(strict=True), alt)
                 images.append(image)
@@ -114,6 +166,6 @@ def extract_local_images(text: str, *, project_root: Path) -> ImageExtraction:
             reason = str(exc) or type(exc).__name__
             failures.append(reason)
             pieces.append(f"[本地图片未转发：{alt or '未命名图片'}（{reason}）]")
-        position = match.end()
+        position = match.end
     pieces.append(text[position:])
     return ImageExtraction("".join(pieces), tuple(images), tuple(failures))
