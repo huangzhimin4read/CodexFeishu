@@ -11,6 +11,7 @@ The project is designed around a fail-closed control plane. Unknown identities, 
 ## Highlights
 
 - **Project and task topics:** activity-triggered private groups for Codex projects, with one Feishu topic per Codex task.
+- **Task lifecycle and title sync:** renaming a Codex task updates the existing Feishu/Lark topic root in place (`task name|project name`) instead of creating a duplicate topic while Feishu still permits that root to be edited. Archiving a Codex task immediately disables its inbound/outbound bridge grant and, when editable, marks that same root `【已归档】`; activating the task again restores the live binding. A provider edit-window or edit-count rejection is persisted as a blocked title projection and is not retried in a loop.
 - **Reliable outbound delivery:** durable SQLite outbox, stable provider UUIDs, retry classification, delivery reconciliation, dead letters, and circuit breakers.
 - **Bidirectional message mirroring:** owner-authored Codex text, images, and path-free file labels are mirrored to the matching Feishu topic. Text can be sent as the authorized Feishu owner through the official `lark-cli`; startup fails closed unless that CLI user's Open ID exactly matches `owner_open_id`. Provider-message ancestry suppresses the resulting Feishu callback, including the send/receive race window, so the mirror cannot re-enter Codex as a new instruction. Bot fallback is visibly labeled with the configured owner display name. The exact user item injected from Feishu is suppressed on its return path using durable `thread + turn + item` identity, so it is neither resubmitted nor displayed twice.
 - **Readable mobile output:** process/final messages, project-local Markdown images, visible Codex image outputs, file-citation labels, and link destinations hidden from provider-visible text.
@@ -60,6 +61,10 @@ The bridge is deliberately local. There is no public webhook and no project-wide
 - A separate non-administrator Windows account only for the legacy `delivery = "app_server"` compatibility path
 
 Feishu scopes, callback subscriptions, rate limits, and response contracts can change. Treat the example contract as a template and validate it against the current developer-console export for your tenant.
+
+Feishu/Lark currently exposes no supported bot or official `lark-cli` operation for subscribing or unsubscribing one user from one topic. A user becomes subscribed through an actual owner-identity reply in that topic. After confirming a new topic root, the bridge therefore sends one visible `🔔 已订阅任务更新` reply through the verified owner `lark-cli` identity; this is the supported automatic-subscription path and its callback is de-duplicated before Codex dispatch. On Codex archive the bridge enforces the controllable security boundary—traffic disabled, grant revoked, root marked archived—but a user who wants the topic removed from the Feishu subscription list must use **Cancel Subscription** in the Feishu client.
+
+Feishu also limits message editing to an administrator-defined time window and at most 20 edits per message. Because a topic title is the root message, an older or frequently renamed topic may no longer be renameable through the supported API. The task binding and archive grant still change correctly; the bridge records the provider rejection instead of creating a duplicate replacement topic.
 
 ## Quick start
 

@@ -171,3 +171,29 @@ class CodexProjectCatalog:
                 )
             )
         return tuple(found)
+
+    def archived_thread_ids(self, thread_ids: set[str] | frozenset[str]) -> frozenset[str]:
+        """Return the requested user tasks that Codex currently marks archived.
+
+        The desktop SQLite index is the archive-state authority.  Restricting
+        the result to already discovered or bound task ids prevents unrelated
+        historical rows from changing bridge state.
+        """
+
+        requested = {str(thread_id) for thread_id in thread_ids if str(thread_id)}
+        if not requested:
+            return frozenset()
+        if not self.state_database_path.is_file():
+            raise DiscoveryError("Codex task index is missing")
+        uri = self.state_database_path.as_uri() + "?mode=ro"
+        try:
+            connection = sqlite3.connect(uri, uri=True, timeout=2.0)
+            rows = connection.execute(
+                "SELECT id FROM threads WHERE archived=1 AND thread_source='user'"
+            ).fetchall()
+        except sqlite3.Error as exc:
+            raise DiscoveryError("Codex task archive state cannot be queried") from exc
+        finally:
+            if "connection" in locals():
+                connection.close()
+        return frozenset(str(row[0]) for row in rows if str(row[0]) in requested)

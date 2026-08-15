@@ -174,6 +174,51 @@ def test_pending_user_send_delays_callback_for_ancestry_reconciliation(
         assert independent["dispatch_not_before"] is None
 
 
+def test_auto_subscription_callback_never_becomes_a_codex_instruction(
+    tmp_path: Path,
+) -> None:
+    with RuntimeStorage(tmp_path / "db.sqlite") as storage:
+        storage.initialize_runtime(sink_mode="control")
+        prepare(storage)
+        body = json.dumps(
+            {"text": "🔔 已订阅任务更新"}, ensure_ascii=False, separators=(",", ":")
+        )
+        outbox_id = storage.enqueue_provider_message(
+            logical_message_id="subscription:thread",
+            thread_id="thread",
+            operation="subscription",
+            endpoint_name="reply_message",
+            target_message_id="anchor",
+            reply_in_thread=True,
+            stable_uuid="stable-subscription",
+            marker="marker",
+            body_json=body,
+            body_hash="hash",
+            priority=90,
+        )
+        storage.connection.execute(
+            "UPDATE provider_outbox SET state='unknown' WHERE outbox_id=?",
+            (outbox_id,),
+        )
+
+        decision = IngressRouter(storage, binding(tmp_path)).ingest(
+            event(
+                "subscription-reply",
+                "🔔 已订阅任务更新",
+                root="anchor",
+                parent="anchor",
+            )
+        )
+
+        assert decision.duplicate
+        assert decision.routing_state == "outbound_echo"
+        row = storage.connection.execute(
+            "SELECT routing_state,dispatch_not_before FROM ingress_messages "
+            "WHERE message_id='subscription-reply'"
+        ).fetchone()
+        assert tuple(row) == ("outbound_echo", None)
+
+
 def test_conflict_and_indeterminate_reply_fail_closed(tmp_path: Path) -> None:
     with RuntimeStorage(tmp_path / "db.sqlite") as storage:
         storage.initialize_runtime(sink_mode="control")

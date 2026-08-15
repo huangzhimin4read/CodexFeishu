@@ -528,6 +528,7 @@ class BridgeService:
         last_pilot_sample = 0.0
         last_project_refresh = 0.0
         automatic_sources: tuple[Any, ...] = ()
+        archived_thread_ids: frozenset[str] = frozenset()
         while not self.stop_event.is_set():
             self._monitor_long_connection()
             static_sources = discover_rollouts(
@@ -543,6 +544,15 @@ class BridgeService:
             ):
                 last_project_refresh = now
                 try:
+                    bound_ids = {
+                        str(row[0])
+                        for row in self.storage.connection.execute(
+                            "SELECT thread_id FROM task_bindings"
+                        ).fetchall()
+                    }
+                    watched_ids = bound_ids | {source.thread_id for source in static_sources}
+                    archived_thread_ids = self.project_catalog.archived_thread_ids(watched_ids)
+                    self._reconcile_archived_task_bindings(archived_thread_ids)
                     candidates = self.project_catalog.active_rollouts(
                         activity_after_ms=self.config.codex_projects.activity_after_ms
                     )
@@ -585,7 +595,10 @@ class BridgeService:
                 {(source.thread_id, str(source.path)): source for source in automatic_sources}
             )
             discovered_sources = tuple(
-                sorted(merged.values(), key=lambda item: (item.modified_ns, str(item.path)))
+                sorted(
+                    (source for source in merged.values() if source.thread_id not in archived_thread_ids),
+                    key=lambda item: (item.modified_ns, str(item.path)),
+                )
             )
             if self.title_reader is not None:
                 for source in discovered_sources:
@@ -697,7 +710,8 @@ class BridgeService:
                     continue
                 chat_id = str(group["chat_id"])
             existing = self.storage.connection.execute(
-                "SELECT project_root,chat_id,conversation_mode FROM task_bindings WHERE thread_id=?",
+                "SELECT project_root,chat_id,conversation_mode,lifecycle_state,opted_in "
+                "FROM task_bindings WHERE thread_id=?",
                 (source.thread_id,),
             ).fetchone()
             if existing is None:
@@ -734,6 +748,8 @@ class BridgeService:
                         ("thread:" + source.thread_id, utc_now()),
                     )
                     continue
+                if existing["lifecycle_state"] == "archived" or not existing["opted_in"]:
+                    anchors.reactivate(source.thread_id)
                 if task_title is not None:
                     anchors.sync_title(source.thread_id, task_title, project_name)
             ownership = self.storage.connection.execute(
@@ -748,6 +764,15 @@ class BridgeService:
                 self.storage.create_thread(source.thread_id, state)
             if getattr(self.config, "remote", None) is not None and self.config.remote.enabled:
                 self._authorize_remote_task(source.thread_id, source.project_root, chat_id)
+
+    def _reconcile_archived_task_bindings(self, thread_ids: frozenset[str]) -> None:
+        anchors = TaskAnchorManager(self.storage)
+        for thread_id in sorted(thread_ids):
+            if anchors.archive(thread_id):
+                self.logger.info(
+                    "task_binding_archived",
+                    extra={"fields": {"thread_id": thread_id}},
+                )
 
     def _authorize_remote_task(
         self, thread_id: str, project_root: Path, chat_id: str

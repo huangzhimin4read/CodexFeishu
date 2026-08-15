@@ -184,17 +184,34 @@ class IngressRouter:
                     connection, chat_id, root_id, parent_id, provider_thread_id, sequence
                 )
             pending_user_echo = False
+            pending_subscription_echo = False
             if target is not None and root_id is not None and parent_id is not None:
                 canonical_text_body = json.dumps(
                     {"text": text}, ensure_ascii=False, separators=(",", ":")
                 )
-                pending_user_echo = connection.execute(
-                    "SELECT 1 FROM provider_outbox WHERE operation='user_message' "
+                pending_outbound_echo = connection.execute(
+                    "SELECT operation FROM provider_outbox "
+                    "WHERE operation IN ('user_message','subscription') "
                     "AND message_type='text' AND state IN ('pending','leased','retryable','unknown') "
                     "AND thread_id=? AND target_message_id IN (?,?) AND body_json=? "
                     "AND julianday(created_at)>=julianday('now','-2 minutes') LIMIT 1",
                     (target, root_id, parent_id, canonical_text_body),
-                ).fetchone() is not None
+                ).fetchone()
+                pending_subscription_echo = (
+                    pending_outbound_echo is not None
+                    and pending_outbound_echo["operation"] == "subscription"
+                )
+                pending_user_echo = (
+                    pending_outbound_echo is not None
+                    and pending_outbound_echo["operation"] == "user_message"
+                )
+                if pending_subscription_echo:
+                    # This fixed administrative reply is generated only by the
+                    # bridge to make Feishu subscribe the verified owner.  It
+                    # must never become a Codex instruction, even when the CLI
+                    # send result is unknown and provider ancestry cannot yet
+                    # be recorded.
+                    routing_state = "outbound_echo"
             connection.execute(
                 "INSERT INTO ingress_messages(tenant_key,app_id,message_id,event_id,chat_id,sender_open_id,"
                 "chat_type,root_id,parent_id,provider_thread_id,message_type,content_hash,raw_hash,received_at,ingest_seq,"
@@ -267,7 +284,13 @@ class IngressRouter:
                 "UPDATE chat_sequences SET next_ingest_seq=next_ingest_seq+1,updated_at=? WHERE binding_key='owner'",
                 (utc_now(),),
             )
-        return IngressDecision(False, routing_state, target, ingest_seq, command)
+        return IngressDecision(
+            pending_subscription_echo,
+            routing_state,
+            target,
+            ingest_seq,
+            command,
+        )
 
     def suppress_if_outbound_echo(self, message_id: str) -> bool:
         """Reconcile a provider callback that raced outbound confirmation."""

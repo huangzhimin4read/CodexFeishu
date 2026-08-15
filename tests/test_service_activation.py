@@ -1,4 +1,5 @@
 import base64
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -6,6 +7,7 @@ from codex_feishu_bridge.codex.rollout_observer import IncrementalRolloutReader
 from codex_feishu_bridge.codex.state_discovery import RolloutSource
 from codex_feishu_bridge.codex.controller import DispatchBusy, DispatchResult
 from codex_feishu_bridge.feishu.client import ProviderOutcome, ResourceDownloadResult
+from codex_feishu_bridge.feishu.tasks import TaskAnchorManager
 from codex_feishu_bridge.runtime_storage import RuntimeStorage
 from codex_feishu_bridge.service import (
     BridgeService,
@@ -198,6 +200,67 @@ def test_service_passes_codex_task_title_to_new_topic_binding(tmp_path: Path) ->
         assert row["task_title"] == "主力开发"
         assert row["project_name"] == "CODEX飞书接口"
         assert row["pending_title_hash"] and row["title_revision"] == 1
+
+
+def test_service_reactivates_archived_binding_and_syncs_new_name(tmp_path: Path) -> None:
+    class Config:
+        project_name = "CODEX飞书接口"
+        feishu = SimpleNamespace(
+            target_chat_id="topic-chat",
+            conversation_mode=SimpleNamespace(value="topic_group"),
+        )
+        remote = SimpleNamespace(enabled=False)
+
+        @staticmethod
+        def allows(mode: RuntimeMode) -> bool:
+            return False
+
+    source = RolloutSource(
+        path=tmp_path / "rollout.jsonl",
+        thread_id="thread",
+        project_root=tmp_path,
+        rollout_version="1",
+        modified_ns=1,
+        task_title="改名后的任务",
+    )
+    with RuntimeStorage(tmp_path / "runtime.db") as storage:
+        storage.initialize_runtime(sink_mode="outbound")
+        manager = TaskAnchorManager(storage)
+        manager.opt_in(
+            thread_id="thread",
+            project_root=tmp_path,
+            chat_id="topic-chat",
+            conversation_mode="topic_group",
+            task_title="旧名称",
+            project_name="CODEX飞书接口",
+        )
+        storage.connection.execute(
+            "UPDATE provider_outbox SET state='confirmed' WHERE operation='anchor'"
+        )
+        storage.connection.execute(
+            "UPDATE task_bindings SET anchor_message_id='anchor',anchor_state='confirmed',"
+            "anchor_title_hash=pending_title_hash,pending_title_hash=NULL,opted_in=0,"
+            "lifecycle_state='archived' WHERE thread_id='thread'"
+        )
+        service = object.__new__(BridgeService)
+        service.config = Config()
+        service.storage = storage
+        service.title_reader = None
+
+        service._ensure_task_bindings((source,))
+
+        binding = storage.connection.execute(
+            "SELECT opted_in,lifecycle_state,task_title FROM task_bindings WHERE thread_id='thread'"
+        ).fetchone()
+        assert tuple(binding) == (1, "active", "改名后的任务")
+        update = storage.connection.execute(
+            "SELECT target_message_id,body_json FROM provider_outbox "
+            "WHERE operation='anchor_title' AND state='pending'"
+        ).fetchone()
+        assert update["target_message_id"] == "anchor"
+        assert json.loads(update["body_json"])["text"] == (
+            "改名后的任务|CODEX飞书接口"
+        )
 
 
 def test_active_turn_barrier_blocks_desktop_and_current_worker_but_not_orphan(

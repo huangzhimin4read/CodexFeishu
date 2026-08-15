@@ -375,10 +375,12 @@ class OutboxWorker:
             )
             return True
         binding = self.storage.connection.execute(
-            "SELECT chat_id,conversation_mode,provider_thread_id FROM task_bindings "
-            "WHERE thread_id=? AND opted_in=1",
+            "SELECT chat_id,conversation_mode,provider_thread_id,opted_in FROM task_bindings "
+            "WHERE thread_id=?",
             (row["thread_id"],),
         ).fetchone()
+        if binding is not None and not binding["opted_in"] and row["operation"] != "anchor_title":
+            binding = None
         if binding is None and row["operation"] in {"control", "selection"}:
             binding = self.storage.connection.execute(
                 "SELECT COALESCE(active_chat_id,p2p_chat_id) AS chat_id,conversation_mode,NULL AS provider_thread_id "
@@ -493,7 +495,7 @@ class OutboxWorker:
         result: ProviderResult | None = None
         outbound_body_json = row["body_json"]
         if (
-            row["operation"] == "user_message"
+            row["operation"] in {"user_message", "subscription"}
             and msg_type == "text"
             and self.user_message_sender is not None
             and row["endpoint_name"] == "reply_message"
@@ -506,7 +508,7 @@ class OutboxWorker:
                 reply_in_thread=bool(row["reply_in_thread"]),
                 idempotency_key=str(row["stable_uuid"]),
             )
-            if result.outcome is ProviderOutcome.PERMANENT:
+            if result.outcome is ProviderOutcome.PERMANENT and row["operation"] == "user_message":
                 fallback_body = {
                     "text": f"👤 {self.owner_display_name}：{body['text']}"
                 }
@@ -635,6 +637,43 @@ class OutboxWorker:
                         utc_now(),
                     ),
                 )
+                if (
+                    self.user_message_sender is not None
+                    and binding["conversation_mode"] == "topic_group"
+                ):
+                    subscription_text = "🔔 已订阅任务更新"
+                    subscription_body = json.dumps(
+                        {"text": subscription_text},
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                    logical_id = "subscription:" + str(row["thread_id"])
+                    now = utc_now()
+                    self.storage.connection.execute(
+                        "INSERT INTO provider_outbox(logical_message_id,thread_id,operation,message_type,"
+                        "endpoint_name,target_message_id,reply_in_thread,stable_uuid,marker,body_json,"
+                        "body_hash,priority,state,next_attempt_at,created_at,updated_at) "
+                        "VALUES(?,?,'subscription','text','reply_message',?,1,?,?,?,?,90,'pending',?,?,?) "
+                        "ON CONFLICT(logical_message_id) DO NOTHING",
+                        (
+                            logical_id,
+                            row["thread_id"],
+                            result.message_id,
+                            stable_uuid(
+                                logical_id,
+                                chat_id=str(binding["chat_id"]),
+                                conversation_mode=str(binding["conversation_mode"]),
+                            ),
+                            invisible_marker(
+                                "cfb:" + sha256(logical_id.encode()).hexdigest()[:24]
+                            ),
+                            subscription_body,
+                            sha256(subscription_body.encode("utf-8")).hexdigest(),
+                            now,
+                            now,
+                            now,
+                        ),
+                    )
             elif row["operation"] == "approval":
                 approval_id = str(row["logical_message_id"]).removeprefix("approval-card:")
                 self.storage.connection.execute(
@@ -685,17 +724,37 @@ class OutboxWorker:
                 next_attempt_at=retry_at,
             )
         elif result.outcome is ProviderOutcome.UNKNOWN:
-            self.storage.finish_outbox(
-                row["outbox_id"],
-                self.instance_id,
-                state=("delivery_indeterminate" if row["operation"] == "anchor_title" else "unknown"),
-                error_code=result.code,
-            )
+            if row["operation"] == "anchor_title":
+                self.storage.fail_task_title_update(
+                    row["outbox_id"],
+                    self.instance_id,
+                    thread_id=row["thread_id"],
+                    title_hash=row["item_id"],
+                    state="delivery_indeterminate",
+                    error_code=result.code,
+                )
+            else:
+                self.storage.finish_outbox(
+                    row["outbox_id"],
+                    self.instance_id,
+                    state="unknown",
+                    error_code=result.code,
+                )
         else:
             terminal = "final_undelivered" if row["operation"] == "final" else "permanent"
-            self.storage.finish_outbox(
-                row["outbox_id"], self.instance_id, state=terminal, error_code=result.code
-            )
+            if row["operation"] == "anchor_title":
+                self.storage.fail_task_title_update(
+                    row["outbox_id"],
+                    self.instance_id,
+                    thread_id=row["thread_id"],
+                    title_hash=row["item_id"],
+                    state="permanent",
+                    error_code=result.code,
+                )
+            else:
+                self.storage.finish_outbox(
+                    row["outbox_id"], self.instance_id, state=terminal, error_code=result.code
+                )
             if terminal == "final_undelivered":
                 self.storage.connection.execute(
                     "INSERT INTO circuit_breakers(breaker_name,state,reason,updated_at) "

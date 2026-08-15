@@ -241,6 +241,82 @@ def test_codex_user_message_can_be_replied_as_authorized_feishu_user(
         assert tuple(ancestry) == ("outbound", "thread", "anchor")
 
 
+def test_new_topic_auto_subscribes_through_verified_owner_reply(tmp_path: Path) -> None:
+    class RecordingClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        def call(self, endpoint: str, **kwargs):
+            self.calls.append((endpoint, kwargs))
+            return ProviderResult(
+                ProviderOutcome.CONFIRMED,
+                "0",
+                message_id="anchor",
+                thread_id="provider-thread",
+            )
+
+    class RecordingUserSender:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def reply_text(self, **kwargs):
+            self.calls.append(kwargs)
+            return ProviderResult(
+                ProviderOutcome.CONFIRMED,
+                "0",
+                message_id="subscription-reply",
+            )
+
+    project = tmp_path / "project"
+    project.mkdir()
+    with RuntimeStorage(tmp_path / "runtime.db") as storage:
+        storage.initialize_runtime(sink_mode="outbound")
+        TaskAnchorManager(storage).opt_in(
+            thread_id="thread",
+            project_root=project,
+            chat_id="topic-chat",
+            conversation_mode="topic_group",
+            task_title="主力开发",
+            project_name="CODEX飞书接口",
+        )
+        client = RecordingClient()
+        sender = RecordingUserSender()
+        worker = OutboxWorker(
+            storage,
+            client,
+            "worker",
+            user_message_sender=sender,
+        )
+
+        assert worker.run_once()
+        subscription = storage.connection.execute(
+            "SELECT operation,target_message_id,reply_in_thread,body_json,state "
+            "FROM provider_outbox WHERE operation='subscription'"
+        ).fetchone()
+        assert tuple(subscription)[:3] == ("subscription", "anchor", 1)
+        assert json.loads(subscription["body_json"])["text"] == "🔔 已订阅任务更新"
+        assert subscription["state"] == "pending"
+
+        assert worker.run_once()
+        assert sender.calls == [
+            {
+                "message_id": "anchor",
+                "text": "🔔 已订阅任务更新",
+                "reply_in_thread": True,
+                "idempotency_key": storage.connection.execute(
+                    "SELECT stable_uuid FROM provider_outbox WHERE operation='subscription'"
+                ).fetchone()[0],
+            }
+        ]
+        assert storage.connection.execute(
+            "SELECT state FROM provider_outbox WHERE operation='subscription'"
+        ).fetchone()[0] == "confirmed"
+        ancestry = storage.connection.execute(
+            "SELECT source,parent_id FROM message_ancestry WHERE message_id='subscription-reply'"
+        ).fetchone()
+        assert tuple(ancestry) == ("outbound", "anchor")
+
+
 def test_user_cli_auth_failure_falls_back_to_labeled_bot_message(
     tmp_path: Path,
 ) -> None:
@@ -628,6 +704,148 @@ def test_existing_topic_title_is_updated_durably_and_only_once(tmp_path: Path) -
         assert not manager.sync_title("thread", "主力 开发", "CODEX飞书接口")
 
 
+def test_permanent_title_failure_is_persisted_without_retry_loop(tmp_path: Path) -> None:
+    class ExpiredEditWindowClient:
+        @staticmethod
+        def call(endpoint: str, **kwargs):
+            assert endpoint == "update_message"
+            return ProviderResult(ProviderOutcome.PERMANENT, "230075")
+
+    project = tmp_path / "project"
+    project.mkdir()
+    with RuntimeStorage(tmp_path / "topic.db") as storage:
+        storage.initialize_runtime(sink_mode="outbound")
+        manager = TaskAnchorManager(storage)
+        manager.opt_in(
+            thread_id="thread",
+            project_root=project,
+            chat_id="topic-chat",
+            conversation_mode="topic_group",
+            task_title="旧名称",
+            project_name="CODEX飞书接口",
+        )
+        storage.connection.execute(
+            "UPDATE provider_outbox SET state='confirmed' WHERE operation='anchor'"
+        )
+        storage.connection.execute(
+            "UPDATE task_bindings SET anchor_message_id='anchor',anchor_state='confirmed',"
+            "anchor_title_hash=pending_title_hash,pending_title_hash=NULL WHERE thread_id='thread'"
+        )
+
+        assert manager.sync_title("thread", "新名称", "CODEX飞书接口")
+        failed_hash = storage.connection.execute(
+            "SELECT item_id FROM provider_outbox WHERE operation='anchor_title'"
+        ).fetchone()[0]
+        assert OutboxWorker(storage, ExpiredEditWindowClient(), "worker").run_once()
+        binding = storage.connection.execute(
+            "SELECT pending_title_hash,blocked_title_hash,title_sync_error "
+            "FROM task_bindings WHERE thread_id='thread'"
+        ).fetchone()
+        assert tuple(binding) == (None, failed_hash, "230075")
+        assert not manager.sync_title("thread", "新名称", "CODEX飞书接口")
+        assert storage.connection.execute(
+            "SELECT COUNT(*) FROM provider_outbox WHERE operation='anchor_title'"
+        ).fetchone()[0] == 1
+
+        assert manager.sync_title("thread", "另一个名称", "CODEX飞书接口")
+        binding = storage.connection.execute(
+            "SELECT blocked_title_hash,title_sync_error,pending_title_hash "
+            "FROM task_bindings WHERE thread_id='thread'"
+        ).fetchone()
+        assert binding["blocked_title_hash"] is None
+        assert binding["title_sync_error"] is None
+        assert binding["pending_title_hash"] is not None
+
+
+def test_archive_deactivates_same_topic_and_reactivation_restores_renamed_title(
+    tmp_path: Path,
+) -> None:
+    class RecordingClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        def call(self, endpoint: str, **kwargs):
+            self.calls.append((endpoint, kwargs))
+            return ProviderResult(ProviderOutcome.CONFIRMED, "0")
+
+    project = tmp_path / "project"
+    project.mkdir()
+    with RuntimeStorage(tmp_path / "topic.db") as storage:
+        storage.initialize_runtime(sink_mode="outbound")
+        manager = TaskAnchorManager(storage)
+        manager.opt_in(
+            thread_id="thread",
+            project_root=project,
+            chat_id="topic-chat",
+            conversation_mode="topic_group",
+            task_title="主力开发",
+            project_name="CODEX飞书接口",
+        )
+        storage.connection.execute(
+            "UPDATE provider_outbox SET state='confirmed',provider_message_id='anchor' "
+            "WHERE operation='anchor'"
+        )
+        storage.connection.execute(
+            "UPDATE task_bindings SET anchor_message_id='anchor',anchor_state='confirmed',"
+            "anchor_title_hash=pending_title_hash,pending_title_hash=NULL WHERE thread_id='thread'"
+        )
+        storage.connection.execute(
+            "INSERT INTO remote_task_grants(thread_id,project_root,chat_id,task_binding_epoch,"
+            "identity_binding_epoch,service_fencing_token,capabilities_json,capabilities_hash,state,"
+            "authorized_at,updated_at) VALUES(?,?,?,?,?,?,?,?,'active',?,?)",
+            (
+                "thread",
+                str(project.resolve()),
+                "topic-chat",
+                0,
+                0,
+                1,
+                "{}",
+                "hash",
+                utc_now(),
+                utc_now(),
+            ),
+        )
+
+        assert manager.archive("thread")
+        binding = storage.connection.execute(
+            "SELECT opted_in,lifecycle_state FROM task_bindings WHERE thread_id='thread'"
+        ).fetchone()
+        assert tuple(binding) == (0, "archived")
+        assert storage.connection.execute(
+            "SELECT state FROM remote_task_grants WHERE thread_id='thread'"
+        ).fetchone()[0] == "revoked"
+        archived_update = storage.connection.execute(
+            "SELECT target_message_id,body_json,state FROM provider_outbox "
+            "WHERE operation='anchor_title'"
+        ).fetchone()
+        assert archived_update["target_message_id"] == "anchor"
+        assert json.loads(archived_update["body_json"])["text"] == (
+            "【已归档】主力开发|CODEX飞书接口"
+        )
+        assert not manager.archive("thread")
+
+        client = RecordingClient()
+        assert OutboxWorker(storage, client, "worker").run_once()
+        assert client.calls[0][0] == "update_message"
+        assert not manager.archive("thread")
+
+        assert manager.reactivate("thread")
+        assert manager.sync_title("thread", "主力开发新版", "CODEX飞书接口")
+        restored = storage.connection.execute(
+            "SELECT target_message_id,body_json FROM provider_outbox "
+            "WHERE operation='anchor_title' AND state='pending'"
+        ).fetchone()
+        assert restored["target_message_id"] == "anchor"
+        assert json.loads(restored["body_json"])["text"] == (
+            "主力开发新版|CODEX飞书接口"
+        )
+        binding = storage.connection.execute(
+            "SELECT opted_in,lifecycle_state FROM task_bindings WHERE thread_id='thread'"
+        ).fetchone()
+        assert tuple(binding) == (1, "active")
+
+
 def test_runtime_v2_database_is_upgraded_without_rebinding(tmp_path: Path) -> None:
     path = tmp_path / "legacy.db"
     connection = sqlite3.connect(path)
@@ -655,7 +873,7 @@ def test_runtime_v2_database_is_upgraded_without_rebinding(tmp_path: Path) -> No
         assert (row["active_chat_id"], row["conversation_mode"]) == ("legacy-chat", "p2p")
         assert storage.connection.execute(
             "SELECT value FROM runtime_metadata WHERE key='runtime_schema_version'"
-        ).fetchone()[0] == "13"
+        ).fetchone()[0] == "15"
         columns = {
             row[1]
             for row in storage.connection.execute("PRAGMA table_info(task_bindings)").fetchall()
@@ -665,7 +883,10 @@ def test_runtime_v2_database_is_upgraded_without_rebinding(tmp_path: Path) -> No
             "project_name",
             "anchor_title_hash",
             "pending_title_hash",
+            "blocked_title_hash",
+            "title_sync_error",
             "title_revision",
+            "lifecycle_state",
         } <= columns
         dispatch_columns = {
             row[1]
@@ -674,6 +895,41 @@ def test_runtime_v2_database_is_upgraded_without_rebinding(tmp_path: Path) -> No
             ).fetchall()
         }
         assert "user_item_id" in dispatch_columns
+
+
+def test_schema_migration_repairs_stuck_permanent_title_projection(tmp_path: Path) -> None:
+    path = tmp_path / "runtime.db"
+    with RuntimeStorage(path) as storage:
+        storage.initialize_runtime(sink_mode="outbound")
+        _prepare(storage)
+        storage.connection.execute(
+            "UPDATE task_bindings SET pending_title_hash='failed-title' WHERE thread_id='thread'"
+        )
+        storage.enqueue_provider_message(
+            logical_message_id="failed-title-update",
+            thread_id="thread",
+            item_id="failed-title",
+            operation="anchor_title",
+            endpoint_name="update_message",
+            target_message_id="anchor",
+            stable_uuid="failed-title-uuid",
+            marker="marker",
+            body_json='{"text":"failed"}',
+            body_hash="hash",
+            priority=95,
+        )
+        storage.connection.execute(
+            "UPDATE provider_outbox SET state='permanent',last_error_code='230075' "
+            "WHERE logical_message_id='failed-title-update'"
+        )
+
+    with RuntimeStorage(path) as storage:
+        storage.initialize_runtime(sink_mode="outbound")
+        row = storage.connection.execute(
+            "SELECT pending_title_hash,blocked_title_hash,title_sync_error "
+            "FROM task_bindings WHERE thread_id='thread'"
+        ).fetchone()
+        assert tuple(row) == (None, "failed-title", "230075")
 
 
 def test_legacy_global_approval_request_id_is_migrated_to_connection_scope(

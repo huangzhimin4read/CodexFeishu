@@ -17,7 +17,7 @@ def utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-RUNTIME_SCHEMA_VERSION = 13
+RUNTIME_SCHEMA_VERSION = 15
 
 
 class RuntimeStorage(BridgeStorage):
@@ -47,7 +47,10 @@ class RuntimeStorage(BridgeStorage):
                 project_name TEXT,
                 anchor_title_hash TEXT,
                 pending_title_hash TEXT,
+                blocked_title_hash TEXT,
+                title_sync_error TEXT,
                 title_revision INTEGER NOT NULL DEFAULT 0,
+                lifecycle_state TEXT NOT NULL DEFAULT 'active' CHECK(lifecycle_state IN ('active','archived')),
                 opted_in INTEGER NOT NULL CHECK(opted_in IN (0,1)),
                 updated_at TEXT NOT NULL
             );
@@ -355,7 +358,10 @@ class RuntimeStorage(BridgeStorage):
                 "project_name": "TEXT",
                 "anchor_title_hash": "TEXT",
                 "pending_title_hash": "TEXT",
+                "blocked_title_hash": "TEXT",
+                "title_sync_error": "TEXT",
                 "title_revision": "INTEGER NOT NULL DEFAULT 0",
+                "lifecycle_state": "TEXT NOT NULL DEFAULT 'active' CHECK(lifecycle_state IN ('active','archived'))",
             },
             "provider_outbox": {
                 "reply_in_thread": "INTEGER NOT NULL DEFAULT 0 CHECK(reply_in_thread IN (0,1))",
@@ -405,6 +411,18 @@ class RuntimeStorage(BridgeStorage):
         self.connection.execute(
             "UPDATE identity_bindings SET active_chat_id=p2p_chat_id "
             "WHERE active_chat_id IS NULL OR active_chat_id=''"
+        )
+        self.connection.execute(
+            "UPDATE task_bindings SET blocked_title_hash=pending_title_hash,"
+            "title_sync_error=COALESCE((SELECT outbox.last_error_code FROM provider_outbox outbox "
+            "WHERE outbox.thread_id=task_bindings.thread_id AND outbox.operation='anchor_title' "
+            "AND outbox.item_id=task_bindings.pending_title_hash "
+            "AND outbox.state IN ('permanent','delivery_indeterminate') "
+            "ORDER BY outbox.outbox_id DESC LIMIT 1),'title_delivery_failed'),"
+            "pending_title_hash=NULL WHERE pending_title_hash IS NOT NULL AND EXISTS("
+            "SELECT 1 FROM provider_outbox outbox WHERE outbox.thread_id=task_bindings.thread_id "
+            "AND outbox.operation='anchor_title' AND outbox.item_id=task_bindings.pending_title_hash "
+            "AND outbox.state IN ('permanent','delivery_indeterminate'))"
         )
 
     def _migrate_approval_request_identity(self) -> None:
@@ -725,12 +743,51 @@ class RuntimeStorage(BridgeStorage):
                 raise InvalidTransition("task title outbox confirmation lost compare-and-swap")
             binding = connection.execute(
                 "UPDATE task_bindings SET anchor_title_hash=?,anchor_marker=?,"
-                "pending_title_hash=NULL,updated_at=? "
+                "pending_title_hash=NULL,blocked_title_hash=NULL,title_sync_error=NULL,updated_at=? "
                 "WHERE thread_id=? AND pending_title_hash=?",
                 (title_hash, leased["marker"], utc_now(), thread_id, title_hash),
             )
             if binding.rowcount != 1:
                 raise InvalidTransition("task title binding confirmation lost compare-and-swap")
+
+    def fail_task_title_update(
+        self,
+        outbox_id: int,
+        instance_id: str,
+        *,
+        thread_id: str,
+        title_hash: str,
+        state: str,
+        error_code: str,
+    ) -> None:
+        """Persist a non-retryable or indeterminate title projection outcome."""
+
+        if state not in {"permanent", "delivery_indeterminate"}:
+            raise ValueError("invalid task title failure state")
+        with self.transaction() as connection:
+            outbox = connection.execute(
+                "UPDATE provider_outbox SET state=?,last_error_code=?,lease_owner=NULL,"
+                "lease_expires_at=NULL,updated_at=? WHERE outbox_id=? AND state='leased' "
+                "AND lease_owner=? AND operation='anchor_title' AND thread_id=? AND item_id=?",
+                (
+                    state,
+                    error_code,
+                    utc_now(),
+                    outbox_id,
+                    instance_id,
+                    thread_id,
+                    title_hash,
+                ),
+            )
+            if outbox.rowcount != 1:
+                raise InvalidTransition("task title failure lost outbox compare-and-swap")
+            binding = connection.execute(
+                "UPDATE task_bindings SET pending_title_hash=NULL,blocked_title_hash=?,"
+                "title_sync_error=?,updated_at=? WHERE thread_id=? AND pending_title_hash=?",
+                (title_hash, error_code, utc_now(), thread_id, title_hash),
+            )
+            if binding.rowcount != 1:
+                raise InvalidTransition("task title failure lost binding compare-and-swap")
 
     @contextmanager
     def immediate(self) -> Iterator[sqlite3.Connection]:

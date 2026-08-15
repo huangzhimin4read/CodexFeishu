@@ -101,3 +101,19 @@ def test_catalog_fails_closed_when_assignment_cwd_disagrees(tmp_path: Path) -> N
     catalog = _catalog_fixture(tmp_path, assigned_cwd=tmp_path / "other")
     with pytest.raises(DiscoveryError, match="paths disagree"):
         catalog.active_rollouts(activity_after_ms=1000)
+
+
+def test_catalog_reports_only_requested_archived_user_tasks(tmp_path: Path) -> None:
+    catalog = _catalog_fixture(tmp_path)
+    connection = sqlite3.connect(catalog.state_database_path)
+    connection.execute("UPDATE threads SET archived=1 WHERE id='thread-active'")
+    connection.execute(
+        "INSERT INTO threads VALUES(?,?,?,?,?,1,'user')",
+        ("unrelated", "missing", str(tmp_path), "历史任务", 1),
+    )
+    connection.commit()
+    connection.close()
+
+    assert catalog.archived_thread_ids({"thread-active", "thread-dormant"}) == frozenset(
+        {"thread-active"}
+    )

@@ -106,7 +106,8 @@ class TaskAnchorManager:
                 "pending_title_hash,"
                 "title_revision,opted_in,updated_at) "
                 "VALUES(?,?,?,'pending',?,?,?,?,?,?,?,1,1,?) "
-                "ON CONFLICT(thread_id) DO UPDATE SET opted_in=1,updated_at=excluded.updated_at",
+                "ON CONFLICT(thread_id) DO UPDATE SET opted_in=1,lifecycle_state='active',"
+                "updated_at=excluded.updated_at",
                 (
                     thread_id,
                     str(project_root.resolve()),
@@ -152,7 +153,8 @@ class TaskAnchorManager:
         with self.storage.immediate() as connection:
             binding = connection.execute(
                 "SELECT project_root,anchor_message_id,anchor_state,anchor_uuid,anchor_title_hash,"
-                "pending_title_hash,title_revision FROM task_bindings WHERE thread_id=? AND opted_in=1",
+                "pending_title_hash,blocked_title_hash,title_revision FROM task_bindings "
+                "WHERE thread_id=? AND opted_in=1",
                 (thread_id,),
             ).fetchone()
             if binding is None or binding["anchor_state"] != "confirmed" or not binding["anchor_message_id"]:
@@ -160,7 +162,11 @@ class TaskAnchorManager:
             display_project = normalize_project_name(project_name, Path(binding["project_root"]))
             visible_title = topic_title(display_title, display_project)
             title_hash = _provider_clean_title_hash(visible_title)
-            if binding["anchor_title_hash"] == title_hash or binding["pending_title_hash"] is not None:
+            if (
+                binding["anchor_title_hash"] == title_hash
+                or binding["pending_title_hash"] is not None
+                or binding["blocked_title_hash"] == title_hash
+            ):
                 return False
             revision = int(binding["title_revision"]) + 1
             marker = invisible_marker(
@@ -194,7 +200,7 @@ class TaskAnchorManager:
             )
             updated = connection.execute(
                 "UPDATE task_bindings SET task_title=?,project_name=?,pending_title_hash=?,"
-                "title_revision=?,updated_at=? "
+                "blocked_title_hash=NULL,title_sync_error=NULL,title_revision=?,updated_at=? "
                 "WHERE thread_id=? AND pending_title_hash IS NULL AND title_revision=?",
                 (
                     display_title,
@@ -209,6 +215,109 @@ class TaskAnchorManager:
             if updated.rowcount != 1:
                 raise RuntimeError("task title update lost compare-and-swap")
         return True
+
+    def archive(self, thread_id: str) -> bool:
+        """Deactivate one task and mark its existing topic as archived.
+
+        Feishu has no supported per-topic unsubscribe API.  This lifecycle is
+        therefore deliberately local and enforceable: remote grants are
+        revoked immediately and no new task traffic is accepted or mirrored.
+        The root message is updated in place when possible, without creating a
+        second topic.
+        """
+
+        now = utc_now()
+        changed = False
+        with self.storage.immediate() as connection:
+            binding = connection.execute(
+                "SELECT project_root,anchor_message_id,anchor_state,anchor_uuid,anchor_title_hash,"
+                "pending_title_hash,blocked_title_hash,title_revision,task_title,project_name,"
+                "opted_in,lifecycle_state "
+                "FROM task_bindings WHERE thread_id=?",
+                (thread_id,),
+            ).fetchone()
+            if binding is None:
+                return False
+            if binding["opted_in"] or binding["lifecycle_state"] != "archived":
+                connection.execute(
+                    "UPDATE task_bindings SET opted_in=0,lifecycle_state='archived',updated_at=? "
+                    "WHERE thread_id=?",
+                    (now, thread_id),
+                )
+                changed = True
+            connection.execute(
+                "UPDATE remote_task_grants SET state='revoked',updated_at=? "
+                "WHERE thread_id=? AND state!='revoked'",
+                (now, thread_id),
+            )
+            if (
+                binding["anchor_state"] != "confirmed"
+                or not binding["anchor_message_id"]
+                or binding["pending_title_hash"] is not None
+            ):
+                return changed
+            display_title = normalize_task_title(binding["task_title"], thread_id)
+            archived_title = normalize_task_title("【已归档】" + display_title, thread_id)
+            display_project = normalize_project_name(
+                binding["project_name"], Path(binding["project_root"])
+            )
+            visible_title = topic_title(archived_title, display_project)
+            title_hash = _provider_clean_title_hash(visible_title)
+            if (
+                binding["anchor_title_hash"] == title_hash
+                or binding["blocked_title_hash"] == title_hash
+            ):
+                return changed
+            revision = int(binding["title_revision"]) + 1
+            marker = invisible_marker(
+                "task:" + sha256(str(binding["anchor_uuid"]).encode()).hexdigest()[:24]
+            )
+            body = json.dumps(
+                {"text": visible_title},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            update_uuid = str(
+                uuid.uuid5(_TASK_NAMESPACE, f"title\x1f{thread_id}\x1f{revision}\x1f{title_hash}")
+            )
+            connection.execute(
+                "INSERT INTO provider_outbox(logical_message_id,thread_id,item_id,operation,endpoint_name,"
+                "target_message_id,stable_uuid,marker,body_json,body_hash,priority,state,next_attempt_at,"
+                "created_at,updated_at) VALUES(?,?,?,'anchor_title','update_message',?,?,?,?,?,95,'pending',?,?,?)",
+                (
+                    f"anchor-title:{thread_id}:{revision}:{title_hash[:16]}",
+                    thread_id,
+                    title_hash,
+                    binding["anchor_message_id"],
+                    update_uuid,
+                    marker,
+                    body,
+                    sha256(body.encode("utf-8")).hexdigest(),
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            updated = connection.execute(
+                "UPDATE task_bindings SET pending_title_hash=?,blocked_title_hash=NULL,"
+                "title_sync_error=NULL,title_revision=?,updated_at=? "
+                "WHERE thread_id=? AND pending_title_hash IS NULL AND title_revision=?",
+                (title_hash, revision, now, thread_id, revision - 1),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("archived task title update lost compare-and-swap")
+            changed = True
+        return changed
+
+    def reactivate(self, thread_id: str) -> bool:
+        """Restore a previously archived binding when Codex activates it again."""
+
+        updated = self.storage.connection.execute(
+            "UPDATE task_bindings SET opted_in=1,lifecycle_state='active',updated_at=? "
+            "WHERE thread_id=? AND (opted_in=0 OR lifecycle_state!='active')",
+            (utc_now(), thread_id),
+        )
+        return updated.rowcount == 1
 
     def confirm(self, thread_id: str, message_id: str) -> None:
         updated = self.storage.connection.execute(
