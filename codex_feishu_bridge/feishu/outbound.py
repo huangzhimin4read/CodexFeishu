@@ -13,12 +13,13 @@ from ..codex.desktop_dispatch import matches_desktop_submission
 from ..models import EventKind, NormalizedEvent, RolloutBatch
 from ..runtime_storage import RuntimeStorage, utc_now
 from .client import FeishuClient, ProviderOutcome, ProviderResult
-from .formatter import format_text_chunks
+from .formatter import format_text_chunks, invisible_marker
 from .images import LocalImage, extract_local_images
 from .user_cli import LarkCliUserSender
 
 
 _NAMESPACE = uuid.UUID("72f6d750-c92e-54e8-ae48-88cff2d6a9af")
+_WAITING_FOR_REPLY_TEXT = "🔔【等待你的回应】"
 
 
 def stable_uuid(material: str, *, chat_id: str, conversation_mode: str) -> str:
@@ -206,6 +207,21 @@ class OutboundPipeline:
             logical_id = f"{event.logical_key}:image:{index}"
             marker = "img:" + sha256(logical_id.encode()).hexdigest()[:24]
             units.append((logical_id, "image", marker, '{"image_key":null}', image))
+        if event.kind is EventKind.FINAL_ANSWER:
+            # Keep the attention cue as the final provider message so Feishu's
+            # topic preview and the bottom of the conversation both make the
+            # handoff state obvious. Final-answer content and images preceding
+            # this cue are durable final parts, not transient commentary.
+            logical_id = f"{event.logical_key}:waiting-for-reply"
+            marker = invisible_marker(
+                "cfb:" + sha256(logical_id.encode()).hexdigest()[:24]
+            )
+            body_json = json.dumps(
+                {"text": _WAITING_FOR_REPLY_TEXT},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            units.append((logical_id, "text", marker, body_json, None))
         for index, (logical_id, message_type, marker, body_json, image) in enumerate(
             units, start=1
         ):
@@ -579,11 +595,18 @@ class OutboxWorker:
                     (utc_now(), row["turn_id"]),
                 )
             elif row["operation"] == "commentary" and result.message_id:
-                self.storage.connection.execute(
-                    "INSERT OR IGNORE INTO transient_messages(message_id,turn_id,message_type,lifecycle_state,"
-                    "created_at,updated_at) VALUES(?,?,?,'transient_active',?,?)",
-                    (result.message_id, row["turn_id"], msg_type, utc_now(), utc_now()),
-                )
+                final_part = self.storage.connection.execute(
+                    "SELECT 1 FROM provider_outbox WHERE thread_id=? AND turn_id=? AND item_id=? "
+                    "AND operation='final' LIMIT 1",
+                    (row["thread_id"], row["turn_id"], row["item_id"]),
+                ).fetchone()
+                if final_part is None:
+                    self.storage.connection.execute(
+                        "INSERT OR IGNORE INTO transient_messages(message_id,turn_id,message_type,"
+                        "lifecycle_state,created_at,updated_at) "
+                        "VALUES(?,?,?,'transient_active',?,?)",
+                        (result.message_id, row["turn_id"], msg_type, utc_now(), utc_now()),
+                    )
             elif row["operation"] == "anchor":
                 self.storage.connection.execute(
                     "UPDATE task_bindings SET anchor_message_id=?,provider_thread_id=?,"

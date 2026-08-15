@@ -1,6 +1,6 @@
 {
   "name": "codex-feishu",
-  "version": "0.1.0+codex.20260814161658",
+  "version": "0.1.0+codex.20260815010747",
   "description": "Operate and verify the owner-only Windows bridge between Codex desktop tasks and Feishu/Lark topics.",
   "author": {
     "name": "Huang Zhimin",

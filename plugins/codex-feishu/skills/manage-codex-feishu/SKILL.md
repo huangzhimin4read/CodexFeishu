@@ -99,6 +99,7 @@ For a message injected from Feishu, verify the exact return item is suppressed b
 
 - Create or rename a Feishu project group only after that Codex project becomes active and no mapped group exists.
 - Keep one Feishu topic per Codex task and use the visible task name plus project name; omit internal task IDs, hashes, citation XML, and local file paths.
+- Distinguish task state from the persisted Codex phase, not message wording. Mirror `commentary` as ordinary process output; after every `final_answer`, keep all final text/images and send a separate `🔔【等待你的回应】` cue as the last topic message.
 - Render links and file citations as path-free visible labels. Upload accessible local images/files instead of exposing their paths.
 - Keep remote text, images, files, approvals, and control commands behind the configured owner-only authorization and audit policy.
 - Prefer `delivery = "cli"` for Feishu/Lark input. It persists through `codex exec resume` and attaches local images with `--image`. Codex allows one writer per task: only an exact CLI active-writer conflict may use the existing desktop writer. The desktop click alone is never acceptance; require the exact new rollout turn and stable user-item ID, otherwise leave the result unconfirmed. Use `desktop` as an explicitly selected UI-automation mode only when requested.

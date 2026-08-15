@@ -73,17 +73,25 @@ def test_rollout_items_outbox_and_cursor_commit_atomically(tmp_path: Path) -> No
             SourceCursor("source", "file", 100, "hash", "1"),
         )
         result = OutboundPipeline(storage).ingest_rollout_batch(batch)
-        assert result.inserted_items == 2 and result.queued_messages == 2
+        assert result.inserted_items == 2 and result.queued_messages == 3
         rows = storage.connection.execute(
-            "SELECT operation,state FROM provider_outbox ORDER BY outbox_id"
+            "SELECT operation,state,body_json FROM provider_outbox ORDER BY outbox_id"
         ).fetchall()
-        assert [tuple(row) for row in rows] == [("commentary", "pending"), ("final", "pending")]
+        assert [(row["operation"], row["state"]) for row in rows] == [
+            ("commentary", "pending"),
+            ("commentary", "pending"),
+            ("final", "pending"),
+        ]
+        assert json.loads(rows[-1]["body_json"])["text"] == "🔔【等待你的回应】"
         first = storage.lease_outbox("worker", "2999-01-01T00:00:00Z")
         assert first["operation"] == "commentary"
         assert storage.lease_outbox("other", "2999-01-01T00:00:00Z") is None
         storage.finish_outbox(first["outbox_id"], "worker", state="confirmed", provider_message_id="m1")
         second = storage.lease_outbox("worker", "2999-01-01T00:00:00Z")
-        assert second["operation"] == "final"
+        assert second["operation"] == "commentary"
+        storage.finish_outbox(second["outbox_id"], "worker", state="confirmed", provider_message_id="m2")
+        third = storage.lease_outbox("worker", "2999-01-01T00:00:00Z")
+        assert third["operation"] == "final"
 
 
 def test_expired_outbox_lease_becomes_unknown_before_any_retry(tmp_path: Path) -> None:
@@ -755,17 +763,19 @@ def test_local_markdown_image_is_uploaded_then_replied_in_task_topic(tmp_path: P
             SourceCursor("source", "file", 100, "hash", "1"),
         )
         result = OutboundPipeline(storage).ingest_rollout_batch(batch)
-        assert result.queued_messages == 2
+        assert result.queued_messages == 3
         rows = storage.connection.execute(
             "SELECT outbox_id,operation,message_type,body_json,state FROM provider_outbox "
             "ORDER BY outbox_id"
         ).fetchall()
         assert [(row["operation"], row["message_type"]) for row in rows] == [
             ("commentary", "text"),
-            ("final", "image"),
+            ("commentary", "image"),
+            ("final", "text"),
         ]
         assert str(image) not in rows[0]["body_json"]
         assert "图片：曲线" in rows[0]["body_json"]
+        assert json.loads(rows[-1]["body_json"])["text"] == "🔔【等待你的回应】"
         stored = storage.connection.execute(
             "SELECT file_name,mime_type,content,content_hash,image_key FROM outbound_images"
         ).fetchone()
@@ -788,6 +798,14 @@ def test_local_markdown_image_is_uploaded_then_replied_in_task_topic(tmp_path: P
             "image_key": "img-fixture"
         }
         assert client.calls[-1][1]["json_body"]["reply_in_thread"] is True
+        assert worker.run_once()  # waiting-for-reply cue
+        assert json.loads(client.calls[-1][1]["json_body"]["content"])["text"] == (
+            "🔔【等待你的回应】"
+        )
+        assert storage.connection.execute(
+            "SELECT COUNT(*) FROM transient_messages WHERE message_id IN "
+            "('message-1','message-2','message-3')"
+        ).fetchone()[0] == 0
 
 
 def test_final_markdown_image_is_resent_after_matching_commentary_image(tmp_path: Path) -> None:
@@ -832,16 +850,18 @@ def test_final_markdown_image_is_resent_after_matching_commentary_image(tmp_path
                 SourceCursor("source", "file", 100, "hash", "1"),
             )
         )
-        assert result.inserted_items == 2 and result.queued_messages == 3
+        assert result.inserted_items == 2 and result.queued_messages == 4
         rows = storage.connection.execute(
             "SELECT operation,message_type,body_json FROM provider_outbox ORDER BY outbox_id"
         ).fetchall()
         assert [(row["operation"], row["message_type"]) for row in rows] == [
             ("commentary", "image"),
             ("commentary", "text"),
-            ("final", "image"),
+            ("commentary", "image"),
+            ("final", "text"),
         ]
         assert "图片：结果" in rows[1]["body_json"]
+        assert json.loads(rows[-1]["body_json"])["text"] == "🔔【等待你的回应】"
         stored = storage.connection.execute(
             "SELECT source_path,file_name,mime_type,content,content_hash FROM outbound_images"
         ).fetchall()
