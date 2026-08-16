@@ -40,6 +40,10 @@ class RolloutNormalizer:
         r"</codex_delegation>\Z",
         re.DOTALL,
     )
+    _SUBAGENT_NOTIFICATION = re.compile(
+        r"\A<subagent_notification>.*</subagent_notification>\Z",
+        re.DOTALL,
+    )
     _IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"})
 
     def __init__(self, supported_versions: frozenset[str] | None = None) -> None:
@@ -181,6 +185,11 @@ class RolloutNormalizer:
             preamble, raw = raw.rsplit(cls._USER_REQUEST_MARKER, 1)
             attached_names = cls._ATTACHED_FILE.findall(preamble)
         raw = cls._IMAGE_REFERENCE.sub("", raw).strip("\r\n")
+        if cls._SUBAGENT_NOTIFICATION.fullmatch(raw):
+            # Codex persists subagent completion/control notifications with a
+            # user role so the parent task can consume them. They are internal
+            # orchestration records, not owner-authored messages for Feishu.
+            return ""
         if raw.startswith("<codex_delegation>"):
             delegation = cls._CODEX_DELEGATION.fullmatch(raw)
             if delegation is None:

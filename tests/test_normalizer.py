@@ -79,6 +79,31 @@ def test_cli_resume_replay_user_message_without_item_identity_is_ignored() -> No
     ) is None
 
 
+def test_subagent_notification_user_envelope_is_not_mirrored() -> None:
+    assert RolloutNormalizer().normalize(
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "thread_id": "thread",
+                "id": "subagent-notification",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": (
+                            "<subagent_notification>\n"
+                            "internal orchestration payload\n"
+                            "</subagent_notification>"
+                        ),
+                    }
+                ],
+                "internal_chat_message_metadata_passthrough": {"turn_id": "turn"},
+            },
+        }
+    ) is None
+
+
 def test_delegated_user_message_hides_internal_envelope_and_source_task() -> None:
     event = RolloutNormalizer().normalize(
         {

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -20,6 +21,40 @@ from .user_cli import LarkCliUserSender
 
 _NAMESPACE = uuid.UUID("72f6d750-c92e-54e8-ae48-88cff2d6a9af")
 _WAITING_FOR_REPLY_TEXT = "🔔【等待你的回应】"
+_SUBAGENT_NOTIFICATION = re.compile(
+    r"\A<subagent_notification>.*</subagent_notification>\Z",
+    re.DOTALL,
+)
+
+
+def suppress_queued_internal_user_notifications(storage: RuntimeStorage) -> int:
+    """Retire queued orchestration envelopes without deleting audit evidence."""
+
+    rows = storage.connection.execute(
+        "SELECT outbox_id,body_json FROM provider_outbox WHERE operation='user_message' "
+        "AND state IN ('pending','retryable')"
+    ).fetchall()
+    suppressed: list[int] = []
+    for row in rows:
+        try:
+            body = json.loads(row["body_json"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        text = body.get("text") if isinstance(body, dict) else None
+        if isinstance(text, str) and _SUBAGENT_NOTIFICATION.fullmatch(text.strip("\r\n")):
+            suppressed.append(int(row["outbox_id"]))
+    if not suppressed:
+        return 0
+    placeholders = ",".join("?" for _ in suppressed)
+    with storage.immediate() as connection:
+        result = connection.execute(
+            "UPDATE provider_outbox SET state='permanent',"
+            "last_error_code='internal_user_notification_suppressed',"
+            "lease_owner=NULL,lease_expires_at=NULL,updated_at=? "
+            f"WHERE outbox_id IN ({placeholders}) AND state IN ('pending','retryable')",
+            (utc_now(), *suppressed),
+        )
+    return int(result.rowcount)
 
 
 def stable_uuid(material: str, *, chat_id: str, conversation_mode: str) -> str:

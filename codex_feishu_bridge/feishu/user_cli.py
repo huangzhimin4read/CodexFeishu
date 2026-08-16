@@ -26,6 +26,7 @@ class LarkCliUserSender:
         executable: Path,
         *,
         profile: str,
+        launcher_arguments: tuple[Path, ...] = (),
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
         timeout_seconds: float = 30.0,
     ) -> None:
@@ -35,6 +36,9 @@ class LarkCliUserSender:
         if not profile.strip():
             raise ValueError("lark-cli profile must not be empty")
         self.executable = resolved
+        self.launcher_arguments = tuple(
+            str(argument.resolve(strict=True)) for argument in launcher_arguments
+        )
         self.profile = profile.strip()
         self.runner = runner
         self.timeout_seconds = timeout_seconds
@@ -44,7 +48,28 @@ class LarkCliUserSender:
         command = shutil.which("lark-cli.cmd") or shutil.which("lark-cli")
         if not command:
             raise LarkCliUnavailable("official lark-cli is not available on PATH")
-        return cls(Path(command), profile=profile)
+        shim = Path(command).resolve(strict=True)
+        if shim.suffix.casefold() == ".cmd":
+            # npm's Windows batch shim expands `%*` through cmd.exe. Literal
+            # `<` and `>` in a user message are then parsed as redirection
+            # before the official CLI receives them. Invoke the same packaged
+            # JavaScript entrypoint with Node directly so every argument stays
+            # an opaque CreateProcess argument.
+            script = shim.parent / "node_modules" / "@larksuite" / "cli" / "scripts" / "run.js"
+            node = shutil.which("node.exe") or shutil.which("node")
+            if not node or not script.is_file():
+                raise LarkCliUnavailable(
+                    "official lark-cli Node entrypoint is unavailable"
+                )
+            return cls(
+                Path(node),
+                profile=profile,
+                launcher_arguments=(script,),
+            )
+        return cls(shim, profile=profile)
+
+    def _command(self, *arguments: str) -> list[str]:
+        return [str(self.executable), *self.launcher_arguments, *arguments]
 
     @staticmethod
     def _json_envelope(stdout: str, stderr: str) -> dict[str, Any] | None:
@@ -70,15 +95,14 @@ class LarkCliUserSender:
 
         if not re.fullmatch(r"ou_[A-Za-z0-9_-]{1,512}", expected_open_id or ""):
             raise LarkCliUnavailable("configured owner_open_id is invalid")
-        command: list[str] = [
-            str(self.executable),
+        command = self._command(
             "--profile",
             self.profile,
             "auth",
             "status",
             "--json",
             "--verify",
-        ]
+        )
         environment = os.environ.copy()
         environment["LARKSUITE_CLI_NO_UPDATE_NOTIFIER"] = "1"
         environment["LARKSUITE_CLI_NO_SKILLS_NOTIFIER"] = "1"
@@ -138,8 +162,7 @@ class LarkCliUserSender:
             return ProviderResult(ProviderOutcome.PERMANENT, "user_cli_empty_text")
         if not 1 <= len(idempotency_key) <= 50:
             return ProviderResult(ProviderOutcome.PERMANENT, "user_cli_invalid_idempotency_key")
-        command: list[str] = [
-            str(self.executable),
+        command = self._command(
             "--profile",
             self.profile,
             "im",
@@ -153,7 +176,7 @@ class LarkCliUserSender:
             "--idempotency-key",
             idempotency_key,
             "--json",
-        ]
+        )
         if reply_in_thread:
             command.append("--reply-in-thread")
         environment = os.environ.copy()

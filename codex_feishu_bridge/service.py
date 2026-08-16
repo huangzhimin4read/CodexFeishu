@@ -40,7 +40,12 @@ from .feishu.events import EventHandlers
 from .feishu.inbound import IngressRouter
 from .feishu.inbound_attachments import materialize_attachment
 from .feishu.long_connection import FeishuLongConnection
-from .feishu.outbound import OutboundPipeline, OutboxWorker, stable_uuid
+from .feishu.outbound import (
+    OutboundPipeline,
+    OutboxWorker,
+    stable_uuid,
+    suppress_queued_internal_user_notifications,
+)
 from .feishu.provisioning import ProvisioningPreflight
 from .feishu.project_groups import ProjectGroupManager
 from .feishu.receipts import queue_ingress_status
@@ -290,6 +295,12 @@ class BridgeService:
                 )
             except LarkCliUnavailable as exc:
                 raise ServiceError(str(exc)) from exc
+        suppressed_notifications = suppress_queued_internal_user_notifications(self.storage)
+        if suppressed_notifications:
+            self.logger.info(
+                "internal_user_notifications_suppressed",
+                extra={"fields": {"count": suppressed_notifications}},
+            )
         self.outbox_worker = OutboxWorker(
             self.storage,
             self.client,

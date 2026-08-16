@@ -2,8 +2,11 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from codex_feishu_bridge.feishu.client import ProviderOutcome
 from codex_feishu_bridge.feishu.user_cli import LarkCliUserSender
+from codex_feishu_bridge.feishu import user_cli
 
 
 def _executable(tmp_path: Path) -> Path:
@@ -51,6 +54,55 @@ def test_lark_cli_user_sender_uses_user_identity_and_thread_reply(tmp_path: Path
     assert command[command.index("--text") + 1] == "用户发言"
     assert "--reply-in-thread" in command
     assert calls[0][1]["env"]["LARKSUITE_CLI_NO_UPDATE_NOTIFIER"] == "1"
+
+
+def test_lark_cli_discovery_bypasses_windows_npm_cmd_shim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    npm_root = tmp_path / "npm"
+    shim = npm_root / "lark-cli.cmd"
+    script = npm_root / "node_modules" / "@larksuite" / "cli" / "scripts" / "run.js"
+    node = tmp_path / "node.exe"
+    script.parent.mkdir(parents=True)
+    shim.write_text("@echo off\n", encoding="utf-8")
+    script.write_text("// official entry\n", encoding="utf-8")
+    node.write_bytes(b"node")
+
+    commands = {
+        "lark-cli.cmd": str(shim),
+        "lark-cli": None,
+        "node.exe": str(node),
+        "node": None,
+    }
+    monkeypatch.setattr(user_cli.shutil, "which", lambda name: commands.get(name))
+
+    sender = LarkCliUserSender.discover(profile="profile-one")
+
+    assert sender.executable == node.resolve()
+    assert sender.launcher_arguments == (str(script.resolve()),)
+    assert sender._command("--profile", "profile-one") == [
+        str(node.resolve()),
+        str(script.resolve()),
+        "--profile",
+        "profile-one",
+    ]
+
+
+def test_lark_cli_discovery_rejects_cmd_shim_without_node_entrypoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shim = tmp_path / "lark-cli.cmd"
+    shim.write_text("@echo off\n", encoding="utf-8")
+    commands = {
+        "lark-cli.cmd": str(shim),
+        "lark-cli": None,
+        "node.exe": None,
+        "node": None,
+    }
+    monkeypatch.setattr(user_cli.shutil, "which", lambda name: commands.get(name))
+
+    with pytest.raises(RuntimeError, match="Node entrypoint is unavailable"):
+        LarkCliUserSender.discover(profile="profile-one")
 
 
 def test_lark_cli_user_sender_verifies_configured_owner_identity(tmp_path: Path) -> None:

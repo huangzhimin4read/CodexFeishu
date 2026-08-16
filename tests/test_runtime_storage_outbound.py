@@ -8,7 +8,11 @@ import pytest
 
 from codex_feishu_bridge.codex.desktop_dispatch import desktop_submission_text_hash
 from codex_feishu_bridge.feishu.client import ProviderOutcome, ProviderResult
-from codex_feishu_bridge.feishu.outbound import OutboundPipeline, OutboxWorker
+from codex_feishu_bridge.feishu.outbound import (
+    OutboundPipeline,
+    OutboxWorker,
+    suppress_queued_internal_user_notifications,
+)
 from codex_feishu_bridge.feishu.tasks import TaskAnchorManager
 from codex_feishu_bridge.models import (
     EmbeddedImage,
@@ -115,6 +119,59 @@ def test_expired_outbox_lease_becomes_unknown_before_any_retry(tmp_path: Path) -
             "WHERE logical_message_id='expired'"
         ).fetchone()
         assert tuple(recovered) == ("unknown", None, None, "lease_expired")
+
+
+def test_queued_subagent_notification_is_retired_and_releases_following_message(
+    tmp_path: Path,
+) -> None:
+    with RuntimeStorage(tmp_path / "runtime.db") as storage:
+        storage.initialize_runtime(sink_mode="control")
+        _prepare(storage)
+        now = utc_now()
+        internal_body = json.dumps(
+            {
+                "text": (
+                    "<subagent_notification>\ninternal\n"
+                    "</subagent_notification>"
+                )
+            }
+        )
+        for logical_id, item_id, operation, body, state in (
+            ("internal", "internal", "user_message", internal_body, "retryable"),
+            ("visible", "visible", "commentary", '{"text":"visible"}', "pending"),
+        ):
+            storage.connection.execute(
+                "INSERT INTO provider_outbox(logical_message_id,thread_id,turn_id,item_id,operation,"
+                "message_type,endpoint_name,target_message_id,reply_in_thread,stable_uuid,marker,"
+                "body_json,body_hash,priority,state,next_attempt_at,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,'text','reply_message','anchor',1,?,?,?,?,'100',?,?,?,?)",
+                (
+                    logical_id,
+                    "thread",
+                    "turn",
+                    item_id,
+                    operation,
+                    logical_id + "-uuid",
+                    logical_id + "-marker",
+                    body,
+                    sha256(body.encode()).hexdigest(),
+                    state,
+                    now,
+                    now,
+                    now,
+                ),
+            )
+
+        assert suppress_queued_internal_user_notifications(storage) == 1
+        internal = storage.connection.execute(
+            "SELECT state,last_error_code FROM provider_outbox WHERE logical_message_id='internal'"
+        ).fetchone()
+        assert tuple(internal) == (
+            "permanent",
+            "internal_user_notification_suppressed",
+        )
+        leased = storage.lease_outbox("worker", "2999-01-01T00:00:00Z")
+        assert leased is not None and leased["logical_message_id"] == "visible"
 
 
 def test_codex_user_message_is_mirrored_once_but_exact_feishu_return_is_suppressed(
