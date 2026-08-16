@@ -404,19 +404,6 @@ class BridgeService:
                 server_epoch=self.server_epoch,
                 connection_epoch=self.connection_epoch,
             )
-            # Current Codex releases correctly reject a second CLI writer while
-            # Desktop owns the task. Route only that definitive conflict through
-            # Desktop's existing writer, then require the exact persisted rollout
-            # turn and user-item identity before claiming acceptance.
-            self.desktop_gateway = CodexDesktopGateway()
-            self.desktop_dispatcher = DesktopCodexDispatcher(
-                self.storage,
-                self.desktop_gateway,
-                codex_home=self.config.codex_home,
-                authorize=self.controller.require_dispatchable,
-                server_epoch=self.server_epoch,
-                connection_epoch=self.connection_epoch,
-            )
         elif self.config.remote.uses_desktop:
             self.desktop_gateway = CodexDesktopGateway()
             self.desktop_dispatcher = DesktopCodexDispatcher(
@@ -974,33 +961,13 @@ class BridgeService:
                         if item.get("type") == "localImage"
                         and isinstance(item.get("path"), str)
                     )
-                    try:
-                        result = self.cli_dispatcher.dispatch(
-                            ingress_message_id=row["message_id"],
-                            thread_id=row["target_thread_id"],
-                            text=dispatch_text,
-                            required_capability=capability,
-                            image_paths=image_paths,
-                        )
-                    except DispatchBusy:
-                        if self.desktop_dispatcher is None:
-                            raise ServiceError("desktop Codex dispatcher is unavailable")
-                        attachment_paths = image_paths
-                        if capability == "file":
-                            attachment = self.storage.connection.execute(
-                                "SELECT local_path FROM ingress_attachments WHERE message_id=?",
-                                (row["message_id"],),
-                            ).fetchone()
-                            if attachment is None or not attachment["local_path"]:
-                                raise ServiceError("desktop file attachment path is unavailable")
-                            attachment_paths += (Path(str(attachment["local_path"])),)
-                        result = self.desktop_dispatcher.dispatch(
-                            ingress_message_id=row["message_id"],
-                            thread_id=row["target_thread_id"],
-                            text=dispatch_text,
-                            required_capability=capability,
-                            attachment_paths=attachment_paths,
-                        )
+                    result = self.cli_dispatcher.dispatch(
+                        ingress_message_id=row["message_id"],
+                        thread_id=row["target_thread_id"],
+                        text=dispatch_text,
+                        required_capability=capability,
+                        image_paths=image_paths,
+                    )
                 elif self.config.remote.uses_desktop:
                     if self.desktop_dispatcher is None:
                         raise ServiceError("desktop Codex dispatcher is unavailable")
@@ -1287,22 +1254,12 @@ class BridgeService:
             if getattr(self.config.remote, "uses_cli", False):
                 if self.cli_dispatcher is None:
                     raise ServiceError("Codex CLI dispatcher is unavailable")
-                try:
-                    result = self.cli_dispatcher.dispatch(
-                        ingress_message_id=row["message_id"],
-                        thread_id=row["target_thread_id"],
-                        text=command.argument,
-                        required_capability="controls",
-                    )
-                except DispatchBusy:
-                    if self.desktop_dispatcher is None:
-                        raise ServiceError("desktop Codex dispatcher is unavailable")
-                    result = self.desktop_dispatcher.dispatch(
-                        ingress_message_id=row["message_id"],
-                        thread_id=row["target_thread_id"],
-                        text=command.argument,
-                        required_capability="controls",
-                    )
+                result = self.cli_dispatcher.dispatch(
+                    ingress_message_id=row["message_id"],
+                    thread_id=row["target_thread_id"],
+                    text=command.argument,
+                    required_capability="controls",
+                )
                 if result.state != "accepted" or result.turn_id is None:
                     raise ServiceError("Codex append acceptance is unconfirmed")
                 acknowledgement = f"已提交给 Codex turn {result.turn_id[:12]}"

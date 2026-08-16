@@ -17,7 +17,7 @@ Codex 飞书（Lark）桥接是一个由单一 owner 在 Windows 本机运行的
 - **适合手机阅读：**同步过程消息和 final；发送项目内 Markdown 图片及 Codex 可见图像；文件引用只显示 `🔗【文件名】`，不暴露本地路径；普通链接只显示可读标签。
 - **明确区分等待状态：**Codex 自动继续运行时，过程消息保持普通样式；当前回合结束后，单独发送 `🔔【等待你的回应】`，在飞书/Lark 话题末尾和手机预览中都能直接看出任务已经停下。
 - **严格入站路由：**派发前核对 owner、tenant、app、群、话题根、回复后代、任务 epoch、项目根目录和能力授权。
-- **远程输入：**文本、图片和文件分别授权。推荐路径先使用 Codex CLI；若 Codex Desktop 已经持有任务 writer，则改由该桌面 writer 提交，并继续核验持久化的 rollout turn ID 与 user-item ID 后才报告成功。附件受大小与格式限制，校验并哈希后写入选定项目的 inbox，不自动执行或解压。
+- **远程输入：**文本、图片和文件分别授权。推荐的 `cli` 模式只使用 Codex CLI；若已有其他 writer 持有任务，消息会保留在持久队列中，等待后续 CLI 重试，不会操作 Codex Desktop 输入框。附件受大小与格式限制，校验并哈希后写入选定项目的 inbox，不自动执行或解压。
 - **真实提交状态：**只有核验到精确的 Codex 用户回合后，飞书/Lark 才显示“已提交 Codex”；两条 writer 路径都不能确认时，消息保持排队或未确认，不虚报送达。飞书消息后的空心圈属于客户端原生已读状态，桥接器和普通飞书开放接口都不能将它消除。
 - **精确去重：**来源去重不依赖正文相同；rollout item、dispatch 记录、provider outbox 和飞书 UUID 共同保证重启及重试后的至多一次可见投递。
 - **远程审批和控制：**短时、单次审批动作，以及受约束的状态、任务、profile、append、stop 和 hard-stop 命令。
@@ -101,7 +101,7 @@ python -m codex_feishu_bridge verify-config --config config/offline.example.toml
    python -m codex_feishu_bridge run --config .runtime/runtime.toml
    ```
 
-远程文本、图片、文件、审批和控制是五个独立开关，只有明确配置后才会启用。推荐使用 `delivery = "cli"`：无人持有任务时通过 `codex exec resume` 写入；Codex Desktop 已经持有 writer 时，仅针对这个明确冲突改走桌面输入面，并在 rollout 中核验 turn ID 与 user-item ID 后才确认。`desktop` 仍可作为显式选择的 UI 自动化方案，App Server 兼容模式仍要求独立 Windows worker 身份。
+远程文本、图片、文件、审批和控制是五个独立开关，只有明确配置后才会启用。推荐使用 `delivery = "cli"`：无人持有任务时通过 `codex exec resume` 写入；已有其他 writer 时保持持久排队，直到后续 CLI 重试能在 rollout 中核验 turn ID 与 user-item ID。该模式绝不操作 Codex Desktop 输入框。`desktop` 是另一个需要显式选择的 UI 自动化方案，App Server 兼容模式仍要求独立 Windows worker 身份。
 
 ## 目录说明
 

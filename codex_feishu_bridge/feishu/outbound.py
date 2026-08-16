@@ -120,8 +120,8 @@ class OutboundPipeline:
         if binding["anchor_state"] != "confirmed" or not binding["anchor_message_id"]:
             raise RuntimeError("task anchor is not confirmed")
 
-        # A Feishu message submitted through the desktop writer is persisted as
-        # a normal Codex user item. Suppress only that exact item when it comes
+        # A Feishu message submitted through a Codex writer is persisted as a
+        # normal Codex user item. Suppress only that exact item when it comes
         # back through rollout observation. Other user messages in the same
         # turn (for example a Codex-originated steer) must still be mirrored.
         if event.source_type == "user_message":

@@ -541,7 +541,9 @@ def test_cli_ingress_uses_cli_writer_and_only_then_queues_submitted(tmp_path: Pa
         assert service._active_rollout_turns == {"thread": frozenset({"cli-turn"})}
 
 
-def test_cli_active_writer_conflict_uses_verified_desktop_writer(tmp_path: Path) -> None:
+def test_cli_active_writer_conflict_stays_queued_without_desktop_fallback(
+    tmp_path: Path,
+) -> None:
     class BusyCliDispatcher:
         calls = 0
 
@@ -552,13 +554,6 @@ def test_cli_active_writer_conflict_uses_verified_desktop_writer(tmp_path: Path)
         def dispatch(self, **kwargs):
             self.calls += 1
             raise DispatchBusy("active writer")
-
-    class RecordingDesktopDispatcher:
-        calls: list[dict] = []
-
-        def dispatch(self, **kwargs):
-            self.calls.append(kwargs)
-            return DispatchResult("attempt", "desktop-turn", "accepted")
 
     contract = tmp_path / "contract.json"
     contract.write_text("{}", encoding="utf-8")
@@ -587,26 +582,91 @@ def test_cli_active_writer_conflict_uses_verified_desktop_writer(tmp_path: Path)
         service.controller = object()
         service.client = object()
         service.cli_dispatcher = BusyCliDispatcher()
-        service.desktop_dispatcher = RecordingDesktopDispatcher()
+        service.desktop_dispatcher = None
         service._active_rollout_turns = {}
 
         service._process_ingress()
 
         assert service.cli_dispatcher.calls == 1
-        assert service.desktop_dispatcher.calls == [{
-            "ingress_message_id": "incoming-busy",
-            "thread_id": "thread",
-            "text": "正在处理时的输入",
-            "required_capability": "text",
-            "attachment_paths": (),
-        }]
         assert storage.connection.execute(
             "SELECT COUNT(*) FROM provider_outbox "
             "WHERE logical_message_id='submitted-ack:incoming-busy'"
-        ).fetchone()[0] == 1
+        ).fetchone()[0] == 0
         assert storage.connection.execute(
             "SELECT COUNT(*) FROM provider_outbox "
             "WHERE logical_message_id='pending-ack:incoming-busy'"
+        ).fetchone()[0] == 1
+        ingress = storage.connection.execute(
+            "SELECT dispatch_attempt_count,last_dispatch_error,dispatch_not_before "
+            "FROM ingress_messages WHERE message_id='incoming-busy'"
+        ).fetchone()
+        assert ingress is not None
+        assert ingress["dispatch_attempt_count"] == 1
+        assert ingress["last_dispatch_error"] == "thread_busy"
+        assert ingress["dispatch_not_before"] is not None
+
+
+def test_cli_append_active_writer_conflict_stays_queued_without_desktop_fallback(
+    tmp_path: Path,
+) -> None:
+    class BusyCliDispatcher:
+        calls: list[dict] = []
+
+        @staticmethod
+        def recover_abandoned_prestarts():
+            return (0, 0)
+
+        def dispatch(self, **kwargs):
+            self.calls.append(kwargs)
+            raise DispatchBusy("active writer")
+
+    contract = tmp_path / "contract.json"
+    contract.write_text("{}", encoding="utf-8")
+    with RuntimeStorage(tmp_path / "runtime.db") as storage:
+        storage.initialize_runtime(sink_mode="control")
+        storage.connection.execute(
+            "INSERT INTO ingress_messages(tenant_key,app_id,message_id,chat_id,sender_open_id,"
+            "chat_type,message_type,content_hash,raw_hash,received_at,ingest_seq,routing_state,"
+            "target_thread_id) VALUES('tenant','app','append-busy','topic-chat','owner','group',"
+            "'text','content','raw',datetime('now'),1,'control','thread')"
+        )
+        storage.connection.execute(
+            "INSERT INTO ingress_payloads(message_id,text,created_at,expires_at) "
+            "VALUES('append-busy','/append 继续处理',datetime('now'),datetime('now','+1 day'))"
+        )
+        service = object.__new__(BridgeService)
+        service.storage = storage
+        service.config = SimpleNamespace(
+            feishu=FeishuBinding(
+                "tenant", "app", "owner", "fallback", "target", contract,
+                ConversationMode.TOPIC_GROUP, "topic-chat",
+            ),
+            remote=SimpleNamespace(uses_cli=True, uses_desktop=False),
+        )
+        service.ingress = SimpleNamespace(suppress_if_outbound_echo=lambda _message_id: False)
+        service.controller = SimpleNamespace(
+            require_control_authorized=lambda _thread_id: None
+        )
+        service.client = object()
+        service.cli_dispatcher = BusyCliDispatcher()
+        service.desktop_dispatcher = None
+        service._active_rollout_turns = {}
+        service._profile_controller = lambda _thread_id: object()
+
+        service._process_ingress()
+
+        assert service.cli_dispatcher.calls == [{
+            "ingress_message_id": "append-busy",
+            "thread_id": "thread",
+            "text": "继续处理",
+            "required_capability": "controls",
+        }]
+        assert storage.connection.execute(
+            "SELECT COUNT(*) FROM provider_outbox "
+            "WHERE logical_message_id='pending-ack:append-busy'"
+        ).fetchone()[0] == 1
+        assert storage.connection.execute(
+            "SELECT COUNT(*) FROM dispatch_records WHERE ingress_message_id='append-busy'"
         ).fetchone()[0] == 0
 
 

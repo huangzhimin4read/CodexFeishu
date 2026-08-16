@@ -33,8 +33,8 @@ controls = false
 auto_approve = false
 # "cli" (recommended) persists text and images into the exact Codex task with
 # `codex exec resume`, then confirms the new user turn from rollout bytes. If
-# Desktop owns the active writer, only that exact conflict uses the desktop
-# composer and still requires persisted turn + user-item confirmation.
+# another writer owns the task, ingress stays durably queued for a later CLI
+# retry. CLI mode never manipulates the Codex Desktop composer.
 # "desktop" is an explicit UI-automation alternative. "app_server" is the
 # isolated-worker compatibility mode.
 delivery = "cli"
