@@ -35,7 +35,18 @@ auto_approve = false
 # `codex exec resume`, then confirms the new user turn from rollout bytes. If
 # another writer owns the task, ingress stays durably queued for a later CLI
 # retry. CLI mode never manipulates the Codex Desktop composer.
-# "desktop" is an explicit UI-automation alternative. "app_server" is the
+# "desktop_relay" submits only to one private Desktop relay task; that task
+# forwards once to the real target through Desktop's cross-task tool. The relay
+# task is excluded from discovery, topic creation, and all Feishu mirroring.
+# Keep one non-minimized primary Codex window available for the relay and use
+# other Codex windows for normal work. The bridge prefills that primary window
+# through the local-task prompt deep link (whose pure deep-link path does not
+# call show/focus), then invokes its Send control without global keyboard or
+# clipboard input. Exact relay and target rollout items are both required.
+# Set both relay identity fields only with that mode.
+#desktop_relay_thread_id = "REPLACE_PRIVATE_RELAY_THREAD_ID"
+#desktop_relay_thread_title = "飞书桥接专用中转"
+# "desktop" is the direct UI-automation alternative. "app_server" is the
 # isolated-worker compatibility mode.
 delivery = "cli"
 max_image_bytes = 10485760

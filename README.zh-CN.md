@@ -57,7 +57,7 @@ Codex CLI resume -> 持久化用户回合 -> 精确任务
 - 如需以本人身份同步 Codex 用户发言：安装飞书官方 `lark-cli` 并完成对应账号授权；安装引导会检测该依赖，并依次提示安装、配置、登录和验证
 - 已创建并发布的飞书自建应用和机器人，以及租户管理员批准的所需权限
 - 使用 Windows 凭据管理器保存飞书 App Secret
-- 使用 `delivery = "desktop"` 时保持 Codex 桌面处于已登录的交互会话
+- 使用 `delivery = "desktop"` 或 `delivery = "desktop_relay"` 时保持 Codex 桌面处于已登录的交互会话
 - 只有兼容模式 `delivery = "app_server"` 需要另一个非管理员 Windows 账户
 
 飞书权限、回调订阅、限流和响应合同可能变化。示例合同只能作为模板，实际启用前必须根据当前租户开发者后台导出结果重新核对。
@@ -101,7 +101,7 @@ python -m codex_feishu_bridge verify-config --config config/offline.example.toml
    python -m codex_feishu_bridge run --config .runtime/runtime.toml
    ```
 
-远程文本、图片、文件、审批和控制是五个独立开关，只有明确配置后才会启用。推荐使用 `delivery = "cli"`：无人持有任务时通过 `codex exec resume` 写入；已有其他 writer 时保持持久排队，直到后续 CLI 重试能在 rollout 中核验 turn ID 与 user-item ID。该模式绝不操作 Codex Desktop 输入框。`desktop` 是另一个需要显式选择的 UI 自动化方案，App Server 兼容模式仍要求独立 Windows worker 身份。
+远程文本、图片、文件、审批和控制是五个独立开关，只有明确配置后才会启用。`delivery = "cli"` 在任务无人持有时通过 `codex exec resume` 写入；已有其他 writer 时保持持久排队，直到后续 CLI 重试能在 rollout 中核验 turn ID 与 user-item ID。`delivery = "desktop_relay"` 把所有远程用户输入先交给一个专用的私有 Desktop 中转任务，由它调用跨任务工具向真实目标转达一次；中转任务自身的收发内容会被排除在项目话题创建和所有飞书镜像之外。请保持一个非最小化的 Codex 主窗口供中转任务使用，并通过 `desktop_relay_thread_id` 与 `desktop_relay_thread_title` 配置精确身份；日常工作建议放在其他 Codex 窗口中。桥接器使用 Codex Desktop 支持的本地任务 `prompt` 深链接预填主窗口，不经过会调用 `show/focus` 的普通第二实例路径；随后只对该窗口自己的“发送”控件执行动作，不使用全局键盘、剪贴板或前台激活。每次都必须先在 Codex rollout 中核验中转 user item，再核验目标任务的 `<codex_delegation>` user item；任一证据缺失时消息保留在持久队列中，不会因不确定回执而重复提交。`desktop` 保留为直接 UI 自动化模式，App Server 兼容模式仍要求独立 Windows worker 身份。
 
 ## 目录说明
 

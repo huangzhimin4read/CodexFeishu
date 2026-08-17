@@ -11,6 +11,7 @@ from hashlib import sha256
 from pathlib import Path
 
 from ..codex.desktop_dispatch import matches_desktop_submission
+from ..codex.desktop_relay_dispatch import matches_desktop_relay_submission
 from ..models import EventKind, NormalizedEvent, RolloutBatch
 from ..runtime_storage import RuntimeStorage, utc_now
 from .client import FeishuClient, ProviderOutcome, ProviderResult
@@ -331,16 +332,26 @@ class OutboundPipeline:
         """Claim a late rollout item for one confirmed desktop UI submission."""
 
         candidates = connection.execute(
-            "SELECT dispatch_attempt_id,ingress_message_id,request_hash,"
+            "SELECT dispatch_attempt_id,ingress_message_id,request_hash,request_id,profile_hash,"
             "submitted_text_hash,has_attachments FROM dispatch_records "
             "WHERE thread_id=? AND state='outcome_unknown' "
-            "AND request_id='desktop-ui-submitted' AND submitted_text_hash IS NOT NULL "
+            "AND request_id IN ('desktop-ui-submitted','desktop-relay-submitted') "
+            "AND submitted_text_hash IS NOT NULL "
             "AND julianday(created_at)>=julianday('now','-2 hours') "
             "ORDER BY created_at,dispatch_attempt_id LIMIT 20",
             (event.thread_id,),
         ).fetchall()
         for candidate in candidates:
-            if not matches_desktop_submission(
+            if candidate["request_id"] == "desktop-relay-submitted":
+                profile_hash = str(candidate["profile_hash"] or "")
+                prefix = "desktop-relay:"
+                if not profile_hash.startswith(prefix) or not matches_desktop_relay_submission(
+                    event.text,
+                    str(candidate["submitted_text_hash"]),
+                    relay_thread_id=profile_hash.removeprefix(prefix),
+                ):
+                    continue
+            elif not matches_desktop_submission(
                 event.text,
                 str(candidate["submitted_text_hash"]),
                 has_attachments=bool(candidate["has_attachments"]),
@@ -349,12 +360,13 @@ class OutboundPipeline:
             updated = connection.execute(
                 "UPDATE dispatch_records SET state='accepted',turn_id=?,user_item_id=?,updated_at=? "
                 "WHERE dispatch_attempt_id=? AND state='outcome_unknown' "
-                "AND request_id='desktop-ui-submitted'",
+                "AND request_id=?",
                 (
                     event.turn_id,
                     event.item_id,
                     utc_now(),
                     candidate["dispatch_attempt_id"],
+                    candidate["request_id"],
                 ),
             )
             if updated.rowcount != 1:

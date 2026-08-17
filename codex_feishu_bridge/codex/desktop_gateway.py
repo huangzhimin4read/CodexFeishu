@@ -32,6 +32,8 @@ class CodexDesktopGateway:
         *,
         script_path: Path | None = None,
         powershell_executable: Path | None = None,
+        background_only: bool = False,
+        expected_thread_title: str | None = None,
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     ) -> None:
         self.script_path = (
@@ -50,6 +52,16 @@ class CodexDesktopGateway:
                 / "powershell.exe"
             )
         self.powershell_executable = powershell_executable.resolve()
+        self.background_only = background_only
+        self.expected_thread_title = (
+            expected_thread_title.strip()
+            if isinstance(expected_thread_title, str)
+            else None
+        )
+        if self.background_only and not self.expected_thread_title:
+            raise DesktopGatewayError(
+                "background desktop input requires an expected task title"
+            )
         self.runner = runner
         if not self.script_path.is_file():
             raise DesktopGatewayError("Codex desktop input helper is missing")
@@ -108,6 +120,14 @@ class CodexDesktopGateway:
             "-TimeoutSeconds",
             str(timeout_seconds),
         ]
+        if self.background_only:
+            command.extend(
+                [
+                    "-BackgroundOnly",
+                    "-ExpectedThreadTitleBase64",
+                    self._utf8_base64(self.expected_thread_title or ""),
+                ]
+            )
         creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         try:
             completed = self.runner(

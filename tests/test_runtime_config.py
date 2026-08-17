@@ -251,6 +251,51 @@ def test_desktop_remote_delivery_uses_the_codex_app_writer_without_worker(tmp_pa
     assert config.worker_isolation is None
 
 
+def test_desktop_relay_delivery_requires_one_private_relay_task(tmp_path: Path) -> None:
+    executable = tmp_path / "codex.exe"
+    executable.write_bytes(b"fixture")
+    path = _write_config(tmp_path, executable)
+    text = path.read_text(encoding="utf-8").replace(
+        'p2p_chat_id="chat"',
+        'p2p_chat_id="chat"\nconversation_mode="topic_group"\ntopic_chat_id="topic-chat"',
+    )
+    text += (
+        '\n[codex_projects]\nenabled=true\nactivity_after_ms=1234567890\n'
+        'primary_project_id="project-1"\n'
+        '\n[remote]\nenabled=true\ntext=true\nimages=true\nfiles=true\n'
+        'approvals=true\ncontrols=true\nauto_approve=true\ndelivery="desktop_relay"\n'
+        'desktop_relay_thread_id="01a00efd-3472-70c2-8a71-fb86b7d8a85c"\n'
+        'desktop_relay_thread_title="飞书桥接专用中转"\n'
+    )
+    path.write_text(text, encoding="utf-8")
+    config = load_runtime_config(path)
+    assert config.remote.delivery is RemoteDeliveryMode.DESKTOP_RELAY
+    assert config.remote.uses_desktop_relay
+    assert config.remote.desktop_relay_thread_title == "飞书桥接专用中转"
+    assert config.remote.uses_host_writer
+    assert config.internal_thread_ids == frozenset(
+        {"01a00efd-3472-70c2-8a71-fb86b7d8a85c"}
+    )
+    assert config.worker_isolation is None
+
+    path.write_text(
+        text.replace(
+            'desktop_relay_thread_id="01a00efd-3472-70c2-8a71-fb86b7d8a85c"\n',
+            "",
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeConfigurationError, match="desktop_relay_thread_id"):
+        load_runtime_config(path)
+
+    path.write_text(
+        text.replace('desktop_relay_thread_title="飞书桥接专用中转"\n', ""),
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeConfigurationError, match="desktop_relay_thread_title"):
+        load_runtime_config(path)
+
+
 def test_cli_remote_delivery_uses_persisted_codex_writer_without_worker(tmp_path: Path) -> None:
     executable = tmp_path / "codex.exe"
     executable.write_bytes(b"fixture")

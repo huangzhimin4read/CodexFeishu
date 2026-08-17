@@ -22,6 +22,7 @@ from .codex.controller import CodexController, DispatchBusy, DispatchError
 from .codex.cli_dispatch import CodexCliDispatcher
 from .codex.cli_gateway import CodexCliGateway
 from .codex.desktop_dispatch import DesktopCodexDispatcher
+from .codex.desktop_relay_dispatch import DesktopRelayCodexDispatcher
 from .codex.desktop_gateway import CodexDesktopGateway, DesktopGatewayError
 from .codex.execution_profile import ApprovalPolicy, ExecutionProfile, SandboxType
 from .codex.rollout_observer import IncrementalRolloutReader
@@ -157,6 +158,7 @@ class BridgeService:
         self.cli_dispatcher: CodexCliDispatcher | None = None
         self.desktop_gateway: CodexDesktopGateway | None = None
         self.desktop_dispatcher: DesktopCodexDispatcher | None = None
+        self.desktop_relay_dispatcher: DesktopRelayCodexDispatcher | None = None
         self.gateway: ApprovalGateway | None = None
         self.ingress: IngressRouter | None = None
         self.outbox_worker: OutboxWorker | None = None
@@ -415,16 +417,37 @@ class BridgeService:
                 server_epoch=self.server_epoch,
                 connection_epoch=self.connection_epoch,
             )
-        elif self.config.remote.uses_desktop:
-            self.desktop_gateway = CodexDesktopGateway()
-            self.desktop_dispatcher = DesktopCodexDispatcher(
-                self.storage,
-                self.desktop_gateway,
-                codex_home=self.config.codex_home,
-                authorize=self.controller.require_dispatchable,
-                server_epoch=self.server_epoch,
-                connection_epoch=self.connection_epoch,
-            )
+        elif self.config.remote.uses_desktop or getattr(
+            self.config.remote, "uses_desktop_relay", False
+        ):
+            if getattr(self.config.remote, "uses_desktop_relay", False):
+                relay_thread_id = self.config.remote.desktop_relay_thread_id
+                relay_thread_title = self.config.remote.desktop_relay_thread_title
+                assert relay_thread_id is not None
+                assert relay_thread_title is not None
+                self.desktop_gateway = CodexDesktopGateway(
+                    background_only=True,
+                    expected_thread_title=relay_thread_title,
+                )
+                self.desktop_relay_dispatcher = DesktopRelayCodexDispatcher(
+                    self.storage,
+                    self.desktop_gateway,
+                    codex_home=self.config.codex_home,
+                    authorize=self.controller.require_dispatchable,
+                    server_epoch=self.server_epoch,
+                    connection_epoch=self.connection_epoch,
+                    relay_thread_id=relay_thread_id,
+                )
+            else:
+                self.desktop_gateway = CodexDesktopGateway()
+                self.desktop_dispatcher = DesktopCodexDispatcher(
+                    self.storage,
+                    self.desktop_gateway,
+                    codex_home=self.config.codex_home,
+                    authorize=self.controller.require_dispatchable,
+                    server_epoch=self.server_epoch,
+                    connection_epoch=self.connection_epoch,
+                )
 
     def _configure_inbound(self) -> None:
         binding = self.config.feishu
@@ -527,12 +550,18 @@ class BridgeService:
         last_project_refresh = 0.0
         automatic_sources: tuple[Any, ...] = ()
         archived_thread_ids: frozenset[str] = frozenset()
+        self._suppress_internal_task_bindings()
         while not self.stop_event.is_set():
             self._monitor_long_connection()
             static_sources = discover_rollouts(
                 self.config.codex_home,
                 project_allowlist=self.config.project_allowlist,
                 thread_allowlist=self.config.thread_allowlist,
+            )
+            static_sources = tuple(
+                source
+                for source in static_sources
+                if source.thread_id not in self.config.internal_thread_ids
             )
             now = time.monotonic()
             if (
@@ -548,11 +577,18 @@ class BridgeService:
                             "SELECT thread_id FROM task_bindings"
                         ).fetchall()
                     }
-                    watched_ids = bound_ids | {source.thread_id for source in static_sources}
+                    watched_ids = (
+                        bound_ids | {source.thread_id for source in static_sources}
+                    ) - self.config.internal_thread_ids
                     archived_thread_ids = self.project_catalog.archived_thread_ids(watched_ids)
                     self._reconcile_archived_task_bindings(archived_thread_ids)
                     candidates = self.project_catalog.active_rollouts(
                         activity_after_ms=self.config.codex_projects.activity_after_ms
+                    )
+                    candidates = tuple(
+                        source
+                        for source in candidates
+                        if source.thread_id not in self.config.internal_thread_ids
                     )
                     projects = {
                         project.project_id: project for project in self.project_catalog.projects()
@@ -690,10 +726,40 @@ class BridgeService:
             if (index + 1) % 5 == 0:
                 self._write_status()
 
+    def _suppress_internal_task_bindings(self) -> None:
+        """Keep relay-only tasks out of every Feishu surface."""
+
+        internal_thread_ids = getattr(self.config, "internal_thread_ids", frozenset())
+        if not internal_thread_ids:
+            return
+        now = utc_now()
+        with self.storage.immediate() as connection:
+            for thread_id in internal_thread_ids:
+                connection.execute(
+                    "UPDATE task_bindings SET opted_in=0,lifecycle_state='archived',updated_at=? "
+                    "WHERE thread_id=?",
+                    (now, thread_id),
+                )
+                connection.execute(
+                    "UPDATE remote_task_grants SET state='revoked',updated_at=? "
+                    "WHERE thread_id=? AND state!='revoked'",
+                    (now, thread_id),
+                )
+                connection.execute(
+                    "UPDATE provider_outbox SET state='permanent',"
+                    "last_error_code='internal_thread_suppressed',lease_owner=NULL,"
+                    "lease_expires_at=NULL,updated_at=? WHERE thread_id=? "
+                    "AND state IN ('pending','retryable')",
+                    (now, thread_id),
+                )
+
     def _ensure_task_bindings(self, sources: tuple[Any, ...]) -> None:
         assert self.config.feishu is not None
         anchors = TaskAnchorManager(self.storage)
+        internal_thread_ids = getattr(self.config, "internal_thread_ids", frozenset())
         for source in sources:
+            if source.thread_id in internal_thread_ids:
+                continue
             task_title = source.task_title
             if self.title_reader is not None and task_title is None:
                 task_title = self.title_reader.title_for(source.thread_id, source.project_root)
@@ -978,6 +1044,30 @@ class BridgeService:
                         text=dispatch_text,
                         required_capability=capability,
                         image_paths=image_paths,
+                    )
+                elif getattr(self.config.remote, "uses_desktop_relay", False):
+                    if self.desktop_relay_dispatcher is None:
+                        raise ServiceError("desktop relay dispatcher is unavailable")
+                    attachment_paths = tuple(
+                        Path(str(item["path"]))
+                        for item in input_items
+                        if item.get("type") == "localImage"
+                        and isinstance(item.get("path"), str)
+                    )
+                    if capability == "file":
+                        attachment = self.storage.connection.execute(
+                            "SELECT local_path FROM ingress_attachments WHERE message_id=?",
+                            (row["message_id"],),
+                        ).fetchone()
+                        if attachment is None or not attachment["local_path"]:
+                            raise ServiceError("desktop relay file attachment path is unavailable")
+                        attachment_paths += (Path(str(attachment["local_path"])),)
+                    result = self.desktop_relay_dispatcher.dispatch(
+                        ingress_message_id=row["message_id"],
+                        thread_id=row["target_thread_id"],
+                        text=dispatch_text,
+                        required_capability=capability,
+                        attachment_paths=attachment_paths,
                     )
                 elif self.config.remote.uses_desktop:
                     if self.desktop_dispatcher is None:

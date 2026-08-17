@@ -79,7 +79,52 @@ def test_gateway_rejects_noncanonical_thread_and_helper_failure(tmp_path: Path) 
         gateway.submit(THREAD_ID, "text")
 
 
-def test_desktop_helper_uses_focused_enter_after_send_readiness() -> None:
+def test_background_gateway_requires_title_and_passes_no_activate_contract(
+    tmp_path: Path,
+) -> None:
+    script, executable = _files(tmp_path)
+    captured: list[list[str]] = []
+
+    def runner(command, **kwargs):
+        captured.append(command)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            json.dumps(
+                {
+                    "ok": True,
+                    "action": "submit",
+                    "threadId": THREAD_ID,
+                    "submitted": True,
+                    "usedForegroundFallback": False,
+                    "backgroundOnly": True,
+                }
+            ),
+            "",
+        )
+
+    with pytest.raises(DesktopGatewayError, match="expected task title"):
+        CodexDesktopGateway(
+            script_path=script,
+            powershell_executable=executable,
+            background_only=True,
+        )
+
+    gateway = CodexDesktopGateway(
+        script_path=script,
+        powershell_executable=executable,
+        background_only=True,
+        expected_thread_title="飞书桥接专用中转",
+        runner=runner,
+    )
+    assert gateway.submit(THREAD_ID, "后台文字").submitted
+    command = captured[0]
+    assert "-BackgroundOnly" in command
+    encoded_title = command[command.index("-ExpectedThreadTitleBase64") + 1]
+    assert base64.b64decode(encoded_title).decode("utf-8") == "飞书桥接专用中转"
+
+
+def test_desktop_helper_has_separate_background_and_foreground_submission_paths() -> None:
     script = (
         Path(__file__).resolve().parents[1]
         / "codex_feishu_bridge"
@@ -87,9 +132,13 @@ def test_desktop_helper_uses_focused_enter_after_send_readiness() -> None:
         / "codex_desktop_input.ps1"
     ).read_text(encoding="utf-8")
 
-    assert "$send.accDoDefaultAction" not in script
     assert "Test-AccessibleActionable $candidate" in script
+    assert "$send.accDoDefaultAction(0)" in script
+    assert "Find-CodexRendererBySelectedTitle" in script
+    assert "if (-not $BackgroundOnly)" in script
     assert "Clipboard]::SetText" in script
     assert "[CodexDesktopNative]::SendPaste()" in script
-    assert "Set-AccessibleValue $composer $text" not in script
+    assert "codex://threads/{0}?prompt={1}" in script
+    assert "[Uri]::EscapeDataString($text)" in script
+    assert "if ($backgroundPrefilledSubmit) { 'send-draft' }" in script
     assert "[CodexDesktopNative]::SendEnter()" in script

@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('draft', 'clear', 'submit', 'stop')]
+    [ValidateSet('inspect', 'draft', 'clear', 'send-draft', 'submit', 'stop')]
     [string]$Action,
 
     [Parameter(Mandatory = $true)]
@@ -10,7 +10,11 @@ param(
 
     [string]$AttachmentsBase64 = '',
 
-    [int]$TimeoutSeconds = 15
+    [int]$TimeoutSeconds = 15,
+
+    [switch]$BackgroundOnly,
+
+    [string]$ExpectedThreadTitleBase64 = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -23,6 +27,41 @@ using System.Runtime.InteropServices;
 
 public static class CodexDesktopNative
 {
+    [ComImport]
+    [Guid("A59AA09A-7011-4B65-939D-32B1FB5547E3")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IAccessibleEditableText
+    {
+        [PreserveSig]
+        int copyText(int startOffset, int endOffset);
+
+        [PreserveSig]
+        int deleteText(int startOffset, int endOffset);
+
+        [PreserveSig]
+        int insertText(
+            int offset,
+            [In, MarshalAs(UnmanagedType.BStr)] ref string text);
+
+        [PreserveSig]
+        int cutText(int startOffset, int endOffset);
+
+        [PreserveSig]
+        int pasteText(int offset);
+
+        [PreserveSig]
+        int replaceText(
+            int startOffset,
+            int endOffset,
+            [In, MarshalAs(UnmanagedType.BStr)] ref string text);
+
+        [PreserveSig]
+        int setAttributes(
+            int startOffset,
+            int endOffset,
+            [In, MarshalAs(UnmanagedType.BStr)] ref string attributes);
+    }
+
     public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
     [StructLayout(LayoutKind.Sequential)]
@@ -107,6 +146,16 @@ public static class CodexDesktopNative
     public static extern uint GetClipboardSequenceNumber();
 
     [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool PostMessage(
+        IntPtr hWnd,
+        uint msg,
+        IntPtr wParam,
+        IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    public static extern uint MapVirtualKey(uint code, uint mapType);
+
+    [DllImport("user32.dll", SetLastError = true)]
     public static extern bool SystemParametersInfo(
         uint uiAction,
         uint uiParam,
@@ -170,6 +219,97 @@ public static class CodexDesktopNative
             ref iid,
             out result);
         return hresult == 0 ? result : null;
+    }
+
+    public static int ReplaceAccessibleText(
+        object accessible,
+        int currentLength,
+        string replacement)
+    {
+        IntPtr unknown = IntPtr.Zero;
+        IntPtr editablePointer = IntPtr.Zero;
+        object editableObject = null;
+        try
+        {
+            unknown = Marshal.GetIUnknownForObject(accessible);
+            var iid = new Guid("A59AA09A-7011-4B65-939D-32B1FB5547E3");
+            var queryResult = Marshal.QueryInterface(
+                unknown,
+                ref iid,
+                out editablePointer);
+            if (queryResult < 0 || editablePointer == IntPtr.Zero)
+            {
+                return queryResult;
+            }
+            editableObject = Marshal.GetTypedObjectForIUnknown(
+                editablePointer,
+                typeof(IAccessibleEditableText));
+            var editable = (IAccessibleEditableText)editableObject;
+            var text = replacement ?? String.Empty;
+            return editable.replaceText(0, currentLength, ref text);
+        }
+        finally
+        {
+            if (editableObject != null && Marshal.IsComObject(editableObject))
+            {
+                Marshal.ReleaseComObject(editableObject);
+            }
+            if (editablePointer != IntPtr.Zero)
+            {
+                Marshal.Release(editablePointer);
+            }
+            if (unknown != IntPtr.Zero)
+            {
+                Marshal.Release(unknown);
+            }
+        }
+    }
+
+    private static IntPtr KeyMessageData(ushort virtualKey, bool released)
+    {
+        var scanCode = MapVirtualKey(virtualKey, 0);
+        long value = 1L | ((long)scanCode << 16);
+        if (released)
+        {
+            value |= 1L << 30;
+            value |= 1L << 31;
+        }
+        return new IntPtr(value);
+    }
+
+    private static bool PostKey(IntPtr window, ushort virtualKey, bool released)
+    {
+        return PostMessage(
+            window,
+            released ? 0x0101u : 0x0100u,
+            new IntPtr(virtualKey),
+            KeyMessageData(virtualKey, released));
+    }
+
+    public static bool PostReplaceText(IntPtr window, string replacement)
+    {
+        // Each Chromium renderer preserves its own focused DOM node while its
+        // top-level window is inactive. Posting directly to that renderer does
+        // not alter the system foreground window.
+        var ok = PostKey(window, 0x11, false)
+            && PostKey(window, 0x41, false)
+            && PostKey(window, 0x41, true)
+            && PostKey(window, 0x11, true)
+            && PostKey(window, 0x08, false)
+            && PostKey(window, 0x08, true);
+        if (!ok)
+        {
+            return false;
+        }
+        foreach (var character in replacement ?? String.Empty)
+        {
+            ok = PostMessage(
+                window,
+                0x0102u,
+                new IntPtr(character),
+                new IntPtr(1)) && ok;
+        }
+        return ok;
     }
 
     public static object FindAccessible(
@@ -256,6 +396,88 @@ public static class CodexDesktopNative
             }
         }
         return null;
+    }
+
+    public static bool HasSelectedAccessibleName(
+        object root,
+        string expectedName,
+        int maxNodes)
+    {
+        var stack = new Stack<object>();
+        stack.Push(root);
+        var visited = 0;
+        while (stack.Count > 0 && visited < maxNodes)
+        {
+            var current = stack.Pop();
+            visited += 1;
+            dynamic accessible = current;
+            try
+            {
+                var name = Convert.ToString(accessible.accName(0));
+                var state = Convert.ToInt32(accessible.accState(0));
+                if (String.Equals(name, expectedName, StringComparison.Ordinal)
+                    && (state & 0x00000002) != 0)
+                {
+                    return true;
+                }
+            }
+            catch { }
+
+            int count;
+            try { count = Convert.ToInt32(accessible.accChildCount); }
+            catch { continue; }
+            for (var index = 1; index <= count; index++)
+            {
+                object child;
+                try { child = accessible.accChild(index); }
+                catch { continue; }
+                if (child != null && !(child is int)) stack.Push(child);
+            }
+        }
+        return false;
+    }
+
+    public static string[] AccessibleNameDiagnostics(
+        object root,
+        string expectedName,
+        int maxNodes)
+    {
+        var result = new List<string>();
+        var stack = new Stack<object>();
+        stack.Push(root);
+        var visited = 0;
+        while (stack.Count > 0 && visited < maxNodes)
+        {
+            var current = stack.Pop();
+            visited += 1;
+            dynamic accessible = current;
+            try
+            {
+                var name = Convert.ToString(accessible.accName(0));
+                if (String.Equals(name, expectedName, StringComparison.Ordinal))
+                {
+                    var role = Convert.ToInt32(accessible.accRole(0));
+                    var state = Convert.ToInt32(accessible.accState(0));
+                    string action;
+                    try { action = Convert.ToString(accessible.accDefaultAction(0)); }
+                    catch { action = String.Empty; }
+                    result.Add(String.Format("role={0};state={1};action={2}", role, state, action));
+                }
+            }
+            catch { }
+
+            int count;
+            try { count = Convert.ToInt32(accessible.accChildCount); }
+            catch { continue; }
+            for (var index = 1; index <= count; index++)
+            {
+                object child;
+                try { child = accessible.accChild(index); }
+                catch { continue; }
+                if (child != null && !(child is int)) stack.Push(child);
+            }
+        }
+        return result.ToArray();
     }
 
     public static bool GetScreenReaderFlag()
@@ -409,12 +631,76 @@ function Find-CodexRenderer {
             if ($value -notlike '*initialRoute=*') {
                 return [pscustomobject]@{
                     WindowHandle = $windowHandle
+                    RendererHandle = $childHandle
                     Renderer = $accessible
                 }
             }
         }
     }
     return $null
+}
+
+function Find-CodexRendererBySelectedTitle {
+    param(
+        [int]$ProcessId,
+        [string]$ExpectedTitle,
+        [AllowNull()][string]$ExpectedComposerValue = $null
+    )
+
+    $selectedMatches = @()
+    $uniqueTitleCandidates = @()
+    $diagnostics = @()
+    foreach ($windowHandle in [CodexDesktopNative]::TopLevelWindows([uint32]$ProcessId)) {
+        foreach ($childHandle in [CodexDesktopNative]::Children($windowHandle)) {
+            if ([CodexDesktopNative]::ClassName($childHandle) -ne 'Chrome_RenderWidgetHostHWND') {
+                continue
+            }
+            $accessible = [CodexDesktopNative]::Accessible($childHandle)
+            if (-not $accessible) {
+                continue
+            }
+            $value = Get-AccessibleProperty $accessible 'value'
+            if ($value -like '*initialRoute=*') {
+                continue
+            }
+            $nameDiagnostics = @([CodexDesktopNative]::AccessibleNameDiagnostics(
+                $accessible,
+                $ExpectedTitle,
+                20000))
+            if ($nameDiagnostics.Count -eq 0) {
+                continue
+            }
+            $composer = Find-Composer $accessible
+            if (-not $composer) {
+                continue
+            }
+            if ($null -ne $ExpectedComposerValue -and
+                [string](Get-AccessibleProperty $composer 'value') -ne $ExpectedComposerValue) {
+                continue
+            }
+            $surface = [pscustomobject]@{
+                WindowHandle = $windowHandle
+                RendererHandle = $childHandle
+                Renderer = $accessible
+            }
+            $uniqueTitleCandidates += $surface
+            $diagnostics += "window=$windowHandle[$($nameDiagnostics -join ',')]"
+            if ([CodexDesktopNative]::HasSelectedAccessibleName(
+                $accessible,
+                $ExpectedTitle,
+                20000)) {
+                $selectedMatches += $surface
+            }
+        }
+    }
+    if ($selectedMatches.Count -eq 1) {
+        return $selectedMatches[0]
+    }
+    if ($selectedMatches.Count -eq 0 -and $uniqueTitleCandidates.Count -eq 1) {
+        return $uniqueTitleCandidates[0]
+    }
+    $detail = if ($diagnostics.Count -eq 0) { 'none' } else { $diagnostics -join '|' }
+    throw "Expected exactly one background Codex window for task '$ExpectedTitle'; selected=$($selectedMatches.Count), exact-title=$($uniqueTitleCandidates.Count), diagnostics=$detail."
 }
 
 function Find-Composer {
@@ -478,20 +764,43 @@ function Remove-DraftAttachments {
 }
 
 function Set-AccessibleValue {
-    param($Accessible, [string]$Value)
+    param($Accessible, [IntPtr]$RendererHandle, [string]$Value)
+    $current = [string](Get-AccessibleProperty $Accessible 'value')
+    $replaceResult = [CodexDesktopNative]::ReplaceAccessibleText(
+        $Accessible,
+        $current.Length,
+        $Value)
+    if ($replaceResult -ge 0 -and
+        [string](Get-AccessibleProperty $Accessible 'value') -eq $Value) {
+        return
+    }
+    $posted = [CodexDesktopNative]::PostReplaceText($RendererHandle, $Value)
+    if ($posted) {
+        Start-Sleep -Milliseconds 200
+        if ([string](Get-AccessibleProperty $Accessible 'value') -eq $Value) {
+            return
+        }
+    }
+    $legacyError = ''
     try {
         $Accessible.set_accValue(0, $Value)
-        return
     }
     catch {
         try {
             $Accessible.accValue(0) = $Value
-            return
         }
         catch {
-            throw 'Codex composer does not accept the accessibility value operation.'
+            $legacyError = $_.Exception.Message
         }
     }
+    if ([string](Get-AccessibleProperty $Accessible 'value') -eq $Value) {
+        return
+    }
+    $replaceUnsigned = [BitConverter]::ToUInt32(
+        [BitConverter]::GetBytes([int32]$replaceResult),
+        0)
+    $replaceHex = ('0x{0:X8}' -f $replaceUnsigned)
+    throw "Codex composer rejected background text editing (IAccessible2=$replaceHex; postMessage=$posted; legacy=$legacyError)."
 }
 
 function Copy-ClipboardDataObject {
@@ -513,7 +822,19 @@ function Copy-ClipboardDataObject {
 }
 
 function Clear-ComposerText {
-    param($Composer, [IntPtr]$WindowHandle)
+    param(
+        $Composer,
+        [IntPtr]$WindowHandle,
+        [IntPtr]$AutomationHandle,
+        [bool]$UseBackgroundAccess
+    )
+    if ($UseBackgroundAccess) {
+        Set-AccessibleValue -Accessible $Composer -RendererHandle $AutomationHandle -Value ''
+        if (-not [string]::IsNullOrEmpty([string](Get-AccessibleProperty $Composer 'value'))) {
+            throw 'Codex composer did not clear through background accessibility.'
+        }
+        return
+    }
     if (-not [CodexDesktopNative]::ForceForeground($WindowHandle)) {
         throw 'Codex window could not be activated for draft clearing.'
     }
@@ -527,10 +848,24 @@ function Paste-ComposerText {
     param(
         $Renderer,
         [IntPtr]$WindowHandle,
+        [IntPtr]$AutomationHandle,
         [string]$Text,
-        [datetime]$Deadline
+        [datetime]$Deadline,
+        [bool]$UseBackgroundAccess
     )
     if ([string]::IsNullOrEmpty($Text)) {
+        return
+    }
+    if ($UseBackgroundAccess) {
+        $composer = Find-Composer $Renderer
+        if (-not $composer) {
+            throw 'Codex composer disappeared before background text input.'
+        }
+        Set-AccessibleValue -Accessible $composer -RendererHandle $AutomationHandle -Value $Text
+        $value = Get-AccessibleProperty $composer 'value'
+        if ([string]$value -ne $Text) {
+            throw 'Codex composer did not expose the background text value.'
+        }
         return
     }
     $clipboardBackup = Copy-ClipboardDataObject
@@ -579,10 +914,14 @@ function Attach-Files {
         [IntPtr]$WindowHandle,
         [int]$ProcessId,
         [string[]]$Paths,
-        [datetime]$Deadline
+        [datetime]$Deadline,
+        [bool]$UseBackgroundAccess
     )
     if ($Paths.Count -eq 0) {
         return
+    }
+    if ($UseBackgroundAccess) {
+        throw 'Background Codex input does not support direct draft attachments.'
     }
     $files = New-Object System.Collections.Specialized.StringCollection
     foreach ($path in $Paths) {
@@ -639,6 +978,9 @@ $result = [ordered]@{
     threadId = $ThreadId
     submitted = $false
     usedForegroundFallback = $false
+    backgroundOnly = [bool]$BackgroundOnly
+    composerTextLength = $null
+    windowHandle = $null
 }
 
 $originalScreenReaderFlag = [CodexDesktopNative]::GetScreenReaderFlag()
@@ -646,7 +988,40 @@ try {
     if (-not $originalScreenReaderFlag) {
         [CodexDesktopNative]::SetScreenReaderFlag($true)
     }
-    Start-Process -FilePath ("codex://threads/{0}" -f $ThreadId)
+    $expectedThreadTitle = Decode-Utf8Base64 $ExpectedThreadTitleBase64
+    if ($BackgroundOnly -and [string]::IsNullOrWhiteSpace($expectedThreadTitle)) {
+        throw 'Background Codex input requires the expected task title.'
+    }
+    $text = Decode-Utf8Base64 $TextBase64
+    $attachmentJson = Decode-Utf8Base64 $AttachmentsBase64
+    $attachments = @()
+    if ($attachmentJson) {
+        $decodedAttachments = ConvertFrom-Json -InputObject $attachmentJson
+        foreach ($attachment in $decodedAttachments) {
+            $attachments += [string]$attachment
+        }
+    }
+    $backgroundPrefilledSubmit = $BackgroundOnly -and $Action -eq 'submit'
+    if ($backgroundPrefilledSubmit) {
+        if ($attachments.Count -gt 0) {
+            throw 'Background relay submission carries attachment paths in text and cannot stage direct draft attachments.'
+        }
+        if ([string]::IsNullOrEmpty($text)) {
+            throw 'Background relay submission requires a non-empty prompt.'
+        }
+        # Codex Desktop's local-conversation deep link supports a prompt query
+        # that the app converts to prefillPrompt. Pure deep-link second-instance
+        # arguments are routed without the main-process foreground path. This
+        # gives the renderer its normal React input events without clipboard or
+        # simulated global keyboard input.
+        $promptUri = "codex://threads/{0}?prompt={1}" -f (
+            $ThreadId,
+            [Uri]::EscapeDataString($text))
+        Start-Process -FilePath $promptUri
+    }
+    elseif (-not $BackgroundOnly) {
+        Start-Process -FilePath ("codex://threads/{0}" -f $ThreadId)
+    }
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $surface = $null
     $composer = $null
@@ -658,7 +1033,25 @@ try {
         if (-not $process) {
             continue
         }
-        $surface = Find-CodexRenderer -ProcessId $process.Id
+        $surface = if ($backgroundPrefilledSubmit) {
+            try {
+                Find-CodexRendererBySelectedTitle `
+                    -ProcessId $process.Id `
+                    -ExpectedTitle $expectedThreadTitle `
+                    -ExpectedComposerValue $text
+            }
+            catch {
+                $null
+            }
+        }
+        elseif ($BackgroundOnly) {
+            Find-CodexRendererBySelectedTitle `
+                -ProcessId $process.Id `
+                -ExpectedTitle $expectedThreadTitle
+        }
+        else {
+            Find-CodexRenderer -ProcessId $process.Id
+        }
         if ($surface) {
             $composer = Find-Composer $surface.Renderer
         }
@@ -666,6 +1059,7 @@ try {
     if (-not $surface -or -not $composer) {
         throw 'Codex desktop composer was not found after task navigation.'
     }
+    $result.windowHandle = $surface.WindowHandle.ToInt64()
     $goalComposerName = Decode-Utf8Base64 '5o+P6L+w5L2g55qE55uu5qCH77yM5a6a5LmJ5Y+v6KGh6YeP55qE5oiQ5p6c77yM5Lul6I635b6X5pyA5L2z5pWI5p6c'
     if ((Get-AccessibleProperty $composer 'name') -in @(
         $goalComposerName,
@@ -696,17 +1090,22 @@ try {
         }
     }
 
-    $text = Decode-Utf8Base64 $TextBase64
-    $attachmentJson = Decode-Utf8Base64 $AttachmentsBase64
-    $attachments = @()
-    if ($attachmentJson) {
-        $decodedAttachments = ConvertFrom-Json -InputObject $attachmentJson
-        foreach ($attachment in $decodedAttachments) {
-            $attachments += [string]$attachment
+    if ($BackgroundOnly -and $Action -in @('send-draft', 'submit')) {
+        $activeStop = Find-ButtonByName $surface.Renderer @(
+            (Decode-Utf8Base64 '5YGc5q2i'),
+            'Stop')
+        if (Test-AccessibleActionable $activeStop) {
+            throw 'The background Codex relay task is busy.'
         }
     }
 
-    if ($Action -eq 'stop') {
+    $effectiveAction = if ($backgroundPrefilledSubmit) { 'send-draft' } else { $Action }
+
+    if ($effectiveAction -eq 'inspect') {
+        $result.composerTextLength = ([string](Get-AccessibleProperty $composer 'value')).Length
+        $result.ok = $true
+    }
+    elseif ($effectiveAction -eq 'stop') {
         $stop = Find-ButtonByName $surface.Renderer @((Decode-Utf8Base64 '5YGc5q2i'), 'Stop')
         if (-not $stop) {
             throw 'Codex task has no active stop control.'
@@ -714,16 +1113,52 @@ try {
         $stop.accDoDefaultAction(0)
         $result.ok = $true
     }
-    elseif ($Action -eq 'clear') {
-        Clear-ComposerText -Composer $composer -WindowHandle $surface.WindowHandle
+    elseif ($effectiveAction -eq 'clear') {
+        Clear-ComposerText -Composer $composer -WindowHandle $surface.WindowHandle -AutomationHandle $surface.RendererHandle -UseBackgroundAccess $BackgroundOnly
         Remove-DraftAttachments $surface.Renderer
         $result.ok = $true
     }
+    elseif ($effectiveAction -eq 'send-draft') {
+        $draftText = [string](Get-AccessibleProperty $composer 'value')
+        if ([string]::IsNullOrEmpty($draftText)) {
+            throw 'The selected Codex relay task has no draft to submit.'
+        }
+        $send = Find-ButtonByName $surface.Renderer @(
+            (Decode-Utf8Base64 '5Y+R6YCB'),
+            'Send')
+        if (-not (Test-AccessibleActionable $send)) {
+            throw 'Codex Send control is unavailable for the prefilled relay draft.'
+        }
+        $send.accDoDefaultAction(0)
+        if ($backgroundPrefilledSubmit) {
+            # Submitting replaces the Chromium accessibility subtree, so the
+            # old composer object is not a reliable acknowledgement. The
+            # Python dispatcher confirms both the relay user item and the
+            # delegated target item from append-only Codex rollout records.
+            $result.ok = $true
+            $result.submitted = $true
+        }
+        else {
+            $submitted = $false
+            while ((Get-Date) -lt $deadline -and -not $submitted) {
+                Start-Sleep -Milliseconds 100
+                $currentComposer = Find-Composer $surface.Renderer
+                if ($currentComposer) {
+                    $submitted = [string](Get-AccessibleProperty $currentComposer 'value') -ne $draftText
+                }
+            }
+            if (-not $submitted) {
+                throw 'Codex Send control did not accept the prefilled relay draft.'
+            }
+            $result.ok = $true
+            $result.submitted = $true
+        }
+    }
     else {
-        Clear-ComposerText -Composer $composer -WindowHandle $surface.WindowHandle
+        Clear-ComposerText -Composer $composer -WindowHandle $surface.WindowHandle -AutomationHandle $surface.RendererHandle -UseBackgroundAccess $BackgroundOnly
         Remove-DraftAttachments $surface.Renderer
-        Attach-Files -Renderer $surface.Renderer -WindowHandle $surface.WindowHandle -ProcessId $process.Id -Paths $attachments -Deadline $deadline
-        Paste-ComposerText -Renderer $surface.Renderer -WindowHandle $surface.WindowHandle -Text $text -Deadline $deadline
+        Attach-Files -Renderer $surface.Renderer -WindowHandle $surface.WindowHandle -ProcessId $process.Id -Paths $attachments -Deadline $deadline -UseBackgroundAccess $BackgroundOnly
+        Paste-ComposerText -Renderer $surface.Renderer -WindowHandle $surface.WindowHandle -AutomationHandle $surface.RendererHandle -Text $text -Deadline $deadline -UseBackgroundAccess $BackgroundOnly
         if ($Action -eq 'draft') {
             $result.ok = $true
         }
@@ -731,7 +1166,12 @@ try {
             $send = $null
             while ((Get-Date) -lt $deadline -and -not $send) {
                 Start-Sleep -Milliseconds 100
-                $surface = Find-CodexRenderer -ProcessId $process.Id
+                $surface = if ($BackgroundOnly) {
+                    Find-CodexRendererBySelectedTitle -ProcessId $process.Id -ExpectedTitle $expectedThreadTitle
+                }
+                else {
+                    Find-CodexRenderer -ProcessId $process.Id
+                }
                 if (-not $surface) {
                     continue
                 }
@@ -753,13 +1193,29 @@ try {
             if (-not $composer) {
                 throw 'Codex composer disappeared before Enter submission.'
             }
-            $composer.accSelect(1, 0)
-            if (-not [CodexDesktopNative]::ForceForeground($surface.WindowHandle)) {
-                throw 'Codex window could not be activated for Enter submission.'
+            if ($BackgroundOnly) {
+                $send.accDoDefaultAction(0)
+                $submitted = $false
+                while ((Get-Date) -lt $deadline -and -not $submitted) {
+                    Start-Sleep -Milliseconds 100
+                    $currentComposer = Find-Composer $surface.Renderer
+                    if ($currentComposer) {
+                        $submitted = [string](Get-AccessibleProperty $currentComposer 'value') -ne $text
+                    }
+                }
+                if (-not $submitted) {
+                    throw 'Codex Send control did not accept the background draft.'
+                }
             }
-            Start-Sleep -Milliseconds 100
-            [CodexDesktopNative]::SendEnter()
-            $result.usedForegroundFallback = $true
+            else {
+                $composer.accSelect(1, 0)
+                if (-not [CodexDesktopNative]::ForceForeground($surface.WindowHandle)) {
+                    throw 'Codex window could not be activated for Enter submission.'
+                }
+                Start-Sleep -Milliseconds 100
+                [CodexDesktopNative]::SendEnter()
+                $result.usedForegroundFallback = $true
+            }
             $result.ok = $true
             $result.submitted = $true
         }

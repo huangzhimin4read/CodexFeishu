@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tomllib
+import uuid
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -35,6 +36,7 @@ class RemoteDeliveryMode(StrEnum):
     APP_SERVER = "app_server"
     CLI = "cli"
     DESKTOP = "desktop"
+    DESKTOP_RELAY = "desktop_relay"
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +57,8 @@ class RemoteCapabilities:
     controls: bool = False
     auto_approve: bool = False
     delivery: RemoteDeliveryMode = RemoteDeliveryMode.APP_SERVER
+    desktop_relay_thread_id: str | None = None
+    desktop_relay_thread_title: str | None = None
     max_image_bytes: int = 10 * 1024 * 1024
     max_file_bytes: int = 25 * 1024 * 1024
 
@@ -64,6 +68,45 @@ class RemoteCapabilities:
         except ValueError as exc:
             raise RuntimeConfigurationError("unsupported remote delivery mode") from exc
         object.__setattr__(self, "delivery", delivery)
+        relay_thread_id = (
+            self.desktop_relay_thread_id.strip()
+            if isinstance(self.desktop_relay_thread_id, str)
+            else None
+        )
+        relay_thread_title = (
+            self.desktop_relay_thread_title.strip()
+            if isinstance(self.desktop_relay_thread_title, str)
+            else None
+        )
+        if delivery is RemoteDeliveryMode.DESKTOP_RELAY:
+            if not relay_thread_id:
+                raise RuntimeConfigurationError(
+                    "desktop_relay delivery requires desktop_relay_thread_id"
+                )
+            try:
+                parsed_relay_id = uuid.UUID(relay_thread_id)
+            except ValueError as exc:
+                raise RuntimeConfigurationError(
+                    "desktop_relay_thread_id must be a canonical UUID"
+                ) from exc
+            if str(parsed_relay_id) != relay_thread_id:
+                raise RuntimeConfigurationError(
+                    "desktop_relay_thread_id must be a canonical UUID"
+                )
+            if not relay_thread_title:
+                raise RuntimeConfigurationError(
+                    "desktop_relay delivery requires desktop_relay_thread_title"
+                )
+            if len(relay_thread_title) > 160:
+                raise RuntimeConfigurationError(
+                    "desktop_relay_thread_title must contain 1..160 characters"
+                )
+        elif relay_thread_id is not None or relay_thread_title is not None:
+            raise RuntimeConfigurationError(
+                "desktop relay identity is only valid for desktop_relay delivery"
+            )
+        object.__setattr__(self, "desktop_relay_thread_id", relay_thread_id)
+        object.__setattr__(self, "desktop_relay_thread_title", relay_thread_title)
         selected = self.text or self.images or self.files or self.approvals or self.controls
         if self.enabled != selected:
             raise RuntimeConfigurationError(
@@ -91,12 +134,20 @@ class RemoteCapabilities:
         return self.enabled and self.receives_messages and self.delivery is RemoteDeliveryMode.DESKTOP
 
     @property
+    def uses_desktop_relay(self) -> bool:
+        return (
+            self.enabled
+            and self.receives_messages
+            and self.delivery is RemoteDeliveryMode.DESKTOP_RELAY
+        )
+
+    @property
     def uses_cli(self) -> bool:
         return self.enabled and self.receives_messages and self.delivery is RemoteDeliveryMode.CLI
 
     @property
     def uses_host_writer(self) -> bool:
-        return self.uses_desktop or self.uses_cli
+        return self.uses_desktop or self.uses_desktop_relay or self.uses_cli
 
 
 class RuntimeConfigurationError(ValueError):
@@ -307,6 +358,11 @@ class RuntimeConfig:
     def allows(self, capability: RuntimeMode) -> bool:
         return _MODE_LEVEL[self.mode] >= _MODE_LEVEL[capability]
 
+    @property
+    def internal_thread_ids(self) -> frozenset[str]:
+        relay_thread_id = self.remote.desktop_relay_thread_id
+        return frozenset({relay_thread_id}) if relay_thread_id is not None else frozenset()
+
 
 def _required(table: dict[str, Any], name: str) -> Any:
     if name not in table:
@@ -451,6 +507,8 @@ def load_runtime_config(path: Path) -> RuntimeConfig:
             "controls",
             "auto_approve",
             "delivery",
+            "desktop_relay_thread_id",
+            "desktop_relay_thread_title",
             "max_image_bytes",
             "max_file_bytes",
         }
@@ -468,6 +526,16 @@ def load_runtime_config(path: Path) -> RuntimeConfig:
             controls=bool(remote_raw.get("controls", False)),
             auto_approve=bool(remote_raw.get("auto_approve", False)),
             delivery=RemoteDeliveryMode(str(remote_raw.get("delivery", "app_server"))),
+            desktop_relay_thread_id=(
+                str(remote_raw["desktop_relay_thread_id"])
+                if remote_raw.get("desktop_relay_thread_id") is not None
+                else None
+            ),
+            desktop_relay_thread_title=(
+                str(remote_raw["desktop_relay_thread_title"])
+                if remote_raw.get("desktop_relay_thread_title") is not None
+                else None
+            ),
             max_image_bytes=int(remote_raw.get("max_image_bytes", 10 * 1024 * 1024)),
             max_file_bytes=int(remote_raw.get("max_file_bytes", 25 * 1024 * 1024)),
         )

@@ -57,7 +57,7 @@ The bridge is deliberately local. There is no public webhook and no project-wide
 - For owner-identity mirroring: the official `lark-cli`, authorized for the matching Feishu account; the installer guide detects it and walks through installation, configuration, login, and verification
 - A Feishu custom app and bot with tenant-approved permissions for the features you enable
 - Windows Credential Manager for the Feishu app secret
-- An interactive Codex desktop session for `delivery = "desktop"`
+- An interactive Codex desktop session for `delivery = "desktop"` or `delivery = "desktop_relay"`
 - A separate non-administrator Windows account only for the legacy `delivery = "app_server"` compatibility path
 
 Feishu scopes, callback subscriptions, rate limits, and response contracts can change. Treat the example contract as a template and validate it against the current developer-console export for your tenant.
@@ -101,7 +101,7 @@ For a real local configuration:
    python -m codex_feishu_bridge run --config .runtime/runtime.toml
    ```
 
-Remote text, images, files, approvals, and controls are separate booleans and remain disabled until explicitly configured. Prefer `delivery = "cli"`: it uses `codex exec resume` for an unowned task and never invokes the Codex Desktop composer. When another writer owns the task, ingress stays in the durable queue until a later CLI retry can confirm the persisted rollout turn and user-item ID. `desktop` remains a separate, explicit UI-automation mode, while the App Server compatibility path still requires a separately principalled worker.
+Remote text, images, files, approvals, and controls are separate booleans and remain disabled until explicitly configured. `delivery = "cli"` uses `codex exec resume` for an unowned task and never invokes the Codex Desktop composer. When another writer owns the task, ingress stays in the durable queue until a later CLI retry can confirm the persisted rollout turn and user-item ID. `delivery = "desktop_relay"` sends every remote user input to one dedicated private Desktop task; that task performs one background cross-task handoff, and its own input/output is excluded from project-topic provisioning and Feishu mirroring. Keep one non-minimized primary Codex window available for the relay and do normal work in other Codex windows; configure the exact relay identity with `desktop_relay_thread_id` and `desktop_relay_thread_title`. The bridge uses Codex Desktop's supported local-task `prompt` deep link, which is handled outside the ordinary second-instance `show/focus` path, and then invokes only that window's Send control. It does not use global keyboard input, the clipboard, or foreground activation. A dispatch is acknowledged only after append-only Codex rollout evidence proves both the exact relay user item and the exact delegated target item; otherwise ingress stays durably queued instead of being retried from an uncertain UI receipt. `desktop` remains the direct UI-automation mode, while the App Server compatibility path still requires a separately principalled worker.
 
 ## Repository layout
 
