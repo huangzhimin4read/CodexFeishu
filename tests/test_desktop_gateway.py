@@ -79,7 +79,7 @@ def test_gateway_rejects_noncanonical_thread_and_helper_failure(tmp_path: Path) 
         gateway.submit(THREAD_ID, "text")
 
 
-def test_background_gateway_requires_title_and_passes_no_activate_contract(
+def test_background_gateway_uses_stable_thread_and_prompt_without_title(
     tmp_path: Path,
 ) -> None:
     script, executable = _files(tmp_path)
@@ -103,25 +103,16 @@ def test_background_gateway_requires_title_and_passes_no_activate_contract(
             "",
         )
 
-    with pytest.raises(DesktopGatewayError, match="expected task title"):
-        CodexDesktopGateway(
-            script_path=script,
-            powershell_executable=executable,
-            background_only=True,
-        )
-
     gateway = CodexDesktopGateway(
         script_path=script,
         powershell_executable=executable,
         background_only=True,
-        expected_thread_title="飞书桥接专用中转",
         runner=runner,
     )
     assert gateway.submit(THREAD_ID, "后台文字").submitted
     command = captured[0]
     assert "-BackgroundOnly" in command
-    encoded_title = command[command.index("-ExpectedThreadTitleBase64") + 1]
-    assert base64.b64decode(encoded_title).decode("utf-8") == "飞书桥接专用中转"
+    assert "-ExpectedThreadTitleBase64" not in command
 
 
 def test_desktop_helper_has_separate_background_and_foreground_submission_paths() -> None:
@@ -135,6 +126,7 @@ def test_desktop_helper_has_separate_background_and_foreground_submission_paths(
     assert "Test-AccessibleActionable $candidate" in script
     assert "$send.accDoDefaultAction(0)" in script
     assert "Find-CodexRendererBySelectedTitle" in script
+    assert "Find-CodexRendererByComposerValue" in script
     assert "if (-not $BackgroundOnly)" in script
     assert "Clipboard]::SetText" in script
     assert "[CodexDesktopNative]::SendPaste()" in script

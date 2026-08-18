@@ -25,7 +25,7 @@ def verify(path: Path) -> dict[str, object]:
         raise ValueError("forbidden legacy notifier scan is not clean")
     external = json.loads((target / "external-gates.json").read_text(encoding="utf-8"))
     if external.get("overall") != "BLOCKED_EXTERNAL":
-        raise ValueError("external-gates artifact does not fail closed")
+        raise ValueError("external-gates artifact does not preserve unresolved status")
     junit_root = ET.parse(target / "test-results.xml").getroot()
     suite = junit_root.find("testsuite") if junit_root.tag == "testsuites" else junit_root
     if suite is None:

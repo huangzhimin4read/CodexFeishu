@@ -183,10 +183,6 @@ def test_full_remote_capabilities_require_topic_project_authority(tmp_path: Path
     text += (
         '\n[codex_projects]\nenabled=true\nactivity_after_ms=1234567890\n'
         'primary_project_id="project-1"\n'
-        '\n[worker_isolation]\nworker_sid="S-1-5-21-1-2-3-1001"\n'
-        'scheduled_task_name="CodexFeishu-Worker-Test"\n'
-        'launch_file=".runtime/isolated-worker-launch.json"\n'
-        'worker_codex_home="../worker-codex-home"\n'
         '\n[remote]\nenabled=true\ntext=true\nimages=true\nfiles=true\n'
         'approvals=true\ncontrols=true\nmax_image_bytes=10485760\nmax_file_bytes=26214400\n'
     )
@@ -212,7 +208,7 @@ def test_full_remote_capabilities_require_topic_project_authority(tmp_path: Path
         load_runtime_config(path)
 
 
-def test_remote_capabilities_require_isolated_worker(tmp_path: Path) -> None:
+def test_remote_capabilities_use_the_local_app_server_without_worker(tmp_path: Path) -> None:
     executable = tmp_path / "codex.exe"
     executable.write_bytes(b"fixture")
     path = _write_config(tmp_path, executable)
@@ -226,8 +222,8 @@ def test_remote_capabilities_require_isolated_worker(tmp_path: Path) -> None:
         '\n[remote]\nenabled=true\ntext=true\n'
     )
     path.write_text(text, encoding="utf-8")
-    with pytest.raises(RuntimeConfigurationError, match="separately-principalled"):
-        load_runtime_config(path)
+    config = load_runtime_config(path)
+    assert config.remote.delivery is RemoteDeliveryMode.APP_SERVER
 
 
 def test_desktop_remote_delivery_uses_the_codex_app_writer_without_worker(tmp_path: Path) -> None:
@@ -248,7 +244,6 @@ def test_desktop_remote_delivery_uses_the_codex_app_writer_without_worker(tmp_pa
     config = load_runtime_config(path)
     assert config.remote.delivery is RemoteDeliveryMode.DESKTOP
     assert config.remote.uses_desktop
-    assert config.worker_isolation is None
 
 
 def test_desktop_relay_delivery_requires_one_private_relay_task(tmp_path: Path) -> None:
@@ -265,18 +260,15 @@ def test_desktop_relay_delivery_requires_one_private_relay_task(tmp_path: Path) 
         '\n[remote]\nenabled=true\ntext=true\nimages=true\nfiles=true\n'
         'approvals=true\ncontrols=true\nauto_approve=true\ndelivery="desktop_relay"\n'
         'desktop_relay_thread_id="01a00efd-3472-70c2-8a71-fb86b7d8a85c"\n'
-        'desktop_relay_thread_title="飞书桥接专用中转"\n'
     )
     path.write_text(text, encoding="utf-8")
     config = load_runtime_config(path)
     assert config.remote.delivery is RemoteDeliveryMode.DESKTOP_RELAY
     assert config.remote.uses_desktop_relay
-    assert config.remote.desktop_relay_thread_title == "飞书桥接专用中转"
     assert config.remote.uses_host_writer
     assert config.internal_thread_ids == frozenset(
         {"01a00efd-3472-70c2-8a71-fb86b7d8a85c"}
     )
-    assert config.worker_isolation is None
 
     path.write_text(
         text.replace(
@@ -287,14 +279,6 @@ def test_desktop_relay_delivery_requires_one_private_relay_task(tmp_path: Path) 
     )
     with pytest.raises(RuntimeConfigurationError, match="desktop_relay_thread_id"):
         load_runtime_config(path)
-
-    path.write_text(
-        text.replace('desktop_relay_thread_title="飞书桥接专用中转"\n', ""),
-        encoding="utf-8",
-    )
-    with pytest.raises(RuntimeConfigurationError, match="desktop_relay_thread_title"):
-        load_runtime_config(path)
-
 
 def test_cli_remote_delivery_uses_persisted_codex_writer_without_worker(tmp_path: Path) -> None:
     executable = tmp_path / "codex.exe"
@@ -316,4 +300,25 @@ def test_cli_remote_delivery_uses_persisted_codex_writer_without_worker(tmp_path
     assert config.remote.uses_cli
     assert config.remote.uses_host_writer
     assert not config.remote.uses_desktop
-    assert config.worker_isolation is None
+
+
+def test_remote_mode_accepts_an_empty_thread_allowlist(tmp_path: Path) -> None:
+    executable = tmp_path / "codex.exe"
+    executable.write_bytes(b"fixture")
+    path = _write_config(tmp_path, executable)
+    text = path.read_text(encoding="utf-8").replace('threads=["thread-1"]', "threads=[]")
+    path.write_text(text, encoding="utf-8")
+    assert load_runtime_config(path).thread_allowlist == frozenset()
+
+
+def test_removed_worker_isolation_config_is_rejected(tmp_path: Path) -> None:
+    executable = tmp_path / "codex.exe"
+    executable.write_bytes(b"fixture")
+    path = _write_config(tmp_path, executable)
+    path.write_text(
+        path.read_text(encoding="utf-8")
+        + '\n[worker_isolation]\nworker_sid="S-1-5-21-1-2-3-1001"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeConfigurationError, match="unknown config fields"):
+        load_runtime_config(path)

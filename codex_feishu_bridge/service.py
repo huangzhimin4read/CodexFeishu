@@ -17,7 +17,6 @@ from .codex.app_server_client import AppServerProtocol, ProtocolError, StdioAppS
 from .codex.approval_gateway import ApprovalGateway
 from .codex.compatibility import CompatibilityMatrix
 from .codex.connection import AppServerConnection
-from .codex.isolated_transport import IsolatedAppServerTransport
 from .codex.controller import CodexController, DispatchBusy, DispatchError
 from .codex.cli_dispatch import CodexCliDispatcher
 from .codex.cli_gateway import CodexCliGateway
@@ -72,7 +71,7 @@ class ServiceError(RuntimeError):
 
 
 class _BorrowedTitleTransport:
-    """Expose one isolated App Server connection to the title reader.
+    """Expose the shared App Server connection to the title reader.
 
     ``close`` is intentionally a no-op: the service owns the underlying
     connection and shuts it down after quiescing all bridge activity.
@@ -172,7 +171,6 @@ class BridgeService:
         self.project_catalog: CodexProjectCatalog | None = None
         self.project_groups: ProjectGroupManager | None = None
         self.title_reader: CodexThreadTitleReader | None = None
-        self.full_access_isolation_verified = False
         self._active_rollout_turns: dict[str, frozenset[str]] = {}
 
     def _acquire_service_fence(self) -> int:
@@ -248,7 +246,19 @@ class BridgeService:
         )
         preflight = self.provisioning.run(live=True, remote=self.config.remote)
         if not preflight.passed:
-            raise ServiceError("tenant provisioning preflight failed: " + ",".join(preflight.failures))
+            hard_failures = {
+                failure
+                for failure in preflight.failures
+                if failure in {"tenant_key_mismatch", "app_id_mismatch"}
+            }
+            if hard_failures:
+                raise ServiceError(
+                    "tenant/app identity mismatch: " + ",".join(sorted(hard_failures))
+                )
+            self.logger.warning(
+                "tenant_provisioning_preflight_warning",
+                extra={"fields": {"failures": list(preflight.failures)}},
+            )
         gate = UpdateGate.load(self.config.generated_schema_root / "baseline.json")
         gate.require_executable(self.config.codex_executable)
         gate.require_schemas(self.config.generated_schema_root)
@@ -269,11 +279,6 @@ class BridgeService:
             primary = projects.get(automation.primary_project_id)
             if primary is None:
                 raise ServiceError("primary project is absent from current Codex projects")
-            if (
-                primary.display_name != self.config.project_name
-                or set(primary.root_paths) != set(self.config.project_allowlist)
-            ):
-                raise ServiceError("primary runtime binding differs from current Codex project state")
             self.project_groups = ProjectGroupManager(
                 self.storage,
                 self.client,
@@ -292,9 +297,7 @@ class BridgeService:
                 user_message_sender = LarkCliUserSender.discover(
                     profile=binding.lark_cli_profile
                 )
-                user_message_sender.verify_identity(
-                    expected_open_id=binding.owner_open_id
-                )
+                user_message_sender.verify_ready()
             except LarkCliUnavailable as exc:
                 raise ServiceError(str(exc)) from exc
         suppressed_notifications = suppress_queued_internal_user_notifications(self.storage)
@@ -341,40 +344,16 @@ class BridgeService:
                 }
             ),
         )
-        isolation = self.config.worker_isolation
-        if isolation is None:
-            transport = StdioAppServer(
-                self.config.codex_executable,
-                self.config.codex_home,
-                protocol,
-            )
-        else:
-            transport = IsolatedAppServerTransport(
-                protocol=protocol,
-                executable=self.config.codex_executable,
-                worker_codex_home=isolation.worker_codex_home,
-                worker_sid=isolation.worker_sid,
-                scheduled_task_name=isolation.scheduled_task_name,
-                launch_file=isolation.launch_file,
-                forbidden_worker_paths={
-                    "runtime_database": self.config.database_path,
-                    "approval_key": self.config.workspace_root / ".runtime" / "approval.key",
-                },
-            )
+        transport = StdioAppServer(
+            self.config.codex_executable,
+            self.config.codex_home,
+            protocol,
+        )
         connection = AppServerConnection(transport)
         connection.start()
-        if isolation is not None:
-            if not isinstance(transport, IsolatedAppServerTransport) or transport.last_attestation is None:
-                raise ServiceError("isolated worker did not provide a verified startup attestation")
-            self.full_access_isolation_verified = True
-            self.storage.upsert_runtime_metadata(
-                "worker_attestation", transport.last_attestation
-            )
         self.codex_connection = connection
         if self.config.remote.enabled:
-            # Never launch a second broker-principal App Server against state
-            # writable by the isolated worker. Title reads share the already
-            # authenticated worker-principal connection instead.
+            # Title reads share the already-open App Server connection.
             self.title_reader = CodexThreadTitleReader(
                 executable=self.config.codex_executable,
                 codex_home=self.config.codex_home,
@@ -422,12 +401,9 @@ class BridgeService:
         ):
             if getattr(self.config.remote, "uses_desktop_relay", False):
                 relay_thread_id = self.config.remote.desktop_relay_thread_id
-                relay_thread_title = self.config.remote.desktop_relay_thread_title
                 assert relay_thread_id is not None
-                assert relay_thread_title is not None
                 self.desktop_gateway = CodexDesktopGateway(
                     background_only=True,
-                    expected_thread_title=relay_thread_title,
                 )
                 self.desktop_relay_dispatcher = DesktopRelayCodexDispatcher(
                     self.storage,
@@ -708,10 +684,22 @@ class BridgeService:
                 result = self.provisioning.run(live=True, remote=self.config.remote)
                 last_preflight = now
                 if not result.passed:
-                    EmergencyController(self.storage, self._terminate_codex).soft_quiesce(
-                        "tenant_drift"
+                    hard_failures = {
+                        failure
+                        for failure in result.failures
+                        if failure in {"tenant_key_mismatch", "app_id_mismatch"}
+                    }
+                    if hard_failures:
+                        self.logger.error(
+                            "tenant_or_app_identity_mismatch",
+                            extra={"fields": {"failures": sorted(hard_failures)}},
+                        )
+                        self.stop_event.set()
+                        continue
+                    self.logger.warning(
+                        "tenant_provisioning_preflight_warning",
+                        extra={"fields": {"failures": list(result.failures)}},
                     )
-                    self.stop_event.set()
             if self.pilot is not None and now - last_pilot_sample >= 60:
                 self.pilot.sample()
                 last_pilot_sample = now
@@ -795,9 +783,7 @@ class BridgeService:
                 )
             else:
                 if (
-                    Path(str(existing["project_root"])).resolve()
-                    != Path(source.project_root).resolve()
-                    or existing["chat_id"] != chat_id
+                    existing["chat_id"] != chat_id
                     or existing["conversation_mode"]
                     != self.config.feishu.conversation_mode.value
                 ):
@@ -812,6 +798,16 @@ class BridgeService:
                         ("thread:" + source.thread_id, utc_now()),
                     )
                     continue
+                if (
+                    Path(str(existing["project_root"])).resolve()
+                    != Path(source.project_root).resolve()
+                ):
+                    now = utc_now()
+                    self.storage.connection.execute(
+                        "UPDATE task_bindings SET project_root=?,current_binding_epoch="
+                        "current_binding_epoch+1,updated_at=? WHERE thread_id=?",
+                        (str(Path(source.project_root).resolve()), now, source.thread_id),
+                    )
                 if existing["lifecycle_state"] == "archived" or not existing["opted_in"]:
                     anchors.reactivate(source.thread_id)
                 if task_title is not None:
@@ -915,21 +911,16 @@ class BridgeService:
         if not any(cwd == root or cwd.is_relative_to(root) for root in unique_roots):
             raise ServiceError("task cwd is outside current Codex project authority")
         default = ExecutionProfile(
-            SandboxType.WORKSPACE_WRITE,
+            SandboxType.DANGER_FULL_ACCESS,
             cwd,
-            approval_policy=(
-                ApprovalPolicy.NEVER
-                if self.config.remote.auto_approve
-                else ApprovalPolicy.ON_REQUEST
-            ),
-            network_access=False,
-            writable_roots=(cwd,),
+            approval_policy=ApprovalPolicy.NEVER,
+            network_access=None,
+            writable_roots=(),
         )
         return ProfileController(
             self.storage,
             unique_roots,
             default,
-            full_access_isolation_verified=self.full_access_isolation_verified,
         )
 
     def _drain_codex_notifications(self) -> None:
@@ -1167,9 +1158,9 @@ class BridgeService:
                 )
 
     def _has_blocking_active_turn(self, thread_id: str) -> bool:
-        """Fail closed while this thread has a live Desktop or bridge turn.
+        """Keep a thread queued while it has a live Desktop or bridge turn.
 
-        A bridge worker is terminated with its Job Object during restart.  A
+        The local App Server is terminated with its Job Object during restart. A
         task_started record from an older fencing generation can consequently
         remain without task_complete; that known orphan must not block the
         thread forever.  Unknown turns are Desktop-owned and always block.
@@ -1195,8 +1186,8 @@ class BridgeService:
     def _active_turn_for_steer(self, thread_id: str) -> str | None:
         """Return the exact live turn that can receive ``turn/steer``.
 
-        A stale turn from an older worker fence is ignored. Multiple live or
-        otherwise indistinguishable turns remain fail-closed because the
+        A stale turn from an older service fence is ignored. Multiple live or
+        otherwise indistinguishable turns stay queued because the
         bridge cannot truthfully choose the Codex target precondition.
         """
 
@@ -1620,8 +1611,8 @@ def _turn_failure_ack(error: object) -> str:
 
 
 def _load_or_create_local_key(path: Path) -> bytes:
-    # The blob is encrypted to the broker's Windows CurrentUser principal; a
-    # distinct full-access worker cannot decrypt it even if it sees the file.
+    # The blob is encrypted to the current Windows user so it is not stored as
+    # plaintext in the runtime directory.
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         value = unprotect_current_user(path.read_bytes())

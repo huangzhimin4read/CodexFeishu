@@ -169,7 +169,7 @@ class _LockedConnection:
 
 
 class BridgeStorage:
-    """Owns the M0 database and enforces fail-closed state transitions."""
+    """Owns the M0 database and enforces deterministic state transitions."""
 
     def __init__(self, path: Path) -> None:
         self.path = path.resolve()

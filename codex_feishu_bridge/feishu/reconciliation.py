@@ -64,17 +64,6 @@ class SendReconciler:
             return self._mark_indeterminate(
                 outbox_id, matches=0, reason="reconciliation_binding_missing"
             )
-        expected_user_open_id: str | None = None
-        if row["operation"] == "user_message":
-            identity = self.storage.connection.execute(
-                "SELECT owner_open_id FROM identity_bindings "
-                "WHERE binding_key='owner' AND state='active'"
-            ).fetchone()
-            if identity is None:
-                return self._mark_indeterminate(
-                    outbox_id, matches=0, reason="reconciliation_identity_missing"
-                )
-            expected_user_open_id = str(identity["owner_open_id"])
         page_token: str | None = None
         matches: list[str] = []
         while True:
@@ -108,7 +97,7 @@ class SendReconciler:
                 sender_type = sender.get("sender_type") if isinstance(sender, dict) else None
                 sender_id = sender.get("id") if isinstance(sender, dict) else None
                 if row["operation"] == "user_message":
-                    if sender_type != "user" or sender_id != expected_user_open_id:
+                    if sender_type != "user":
                         continue
                 elif sender_type not in {"app", "bot"} or sender_id != self.client.app_id:
                     continue

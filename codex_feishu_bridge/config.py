@@ -1,4 +1,4 @@
-"""Configuration with fail-closed M0 defaults."""
+"""Configuration for the local bridge runtime."""
 
 from __future__ import annotations
 

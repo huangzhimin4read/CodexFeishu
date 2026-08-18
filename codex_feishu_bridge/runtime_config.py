@@ -58,7 +58,6 @@ class RemoteCapabilities:
     auto_approve: bool = False
     delivery: RemoteDeliveryMode = RemoteDeliveryMode.APP_SERVER
     desktop_relay_thread_id: str | None = None
-    desktop_relay_thread_title: str | None = None
     max_image_bytes: int = 10 * 1024 * 1024
     max_file_bytes: int = 25 * 1024 * 1024
 
@@ -71,11 +70,6 @@ class RemoteCapabilities:
         relay_thread_id = (
             self.desktop_relay_thread_id.strip()
             if isinstance(self.desktop_relay_thread_id, str)
-            else None
-        )
-        relay_thread_title = (
-            self.desktop_relay_thread_title.strip()
-            if isinstance(self.desktop_relay_thread_title, str)
             else None
         )
         if delivery is RemoteDeliveryMode.DESKTOP_RELAY:
@@ -93,20 +87,11 @@ class RemoteCapabilities:
                 raise RuntimeConfigurationError(
                     "desktop_relay_thread_id must be a canonical UUID"
                 )
-            if not relay_thread_title:
-                raise RuntimeConfigurationError(
-                    "desktop_relay delivery requires desktop_relay_thread_title"
-                )
-            if len(relay_thread_title) > 160:
-                raise RuntimeConfigurationError(
-                    "desktop_relay_thread_title must contain 1..160 characters"
-                )
-        elif relay_thread_id is not None or relay_thread_title is not None:
+        elif relay_thread_id is not None:
             raise RuntimeConfigurationError(
                 "desktop relay identity is only valid for desktop_relay delivery"
             )
         object.__setattr__(self, "desktop_relay_thread_id", relay_thread_id)
-        object.__setattr__(self, "desktop_relay_thread_title", relay_thread_title)
         selected = self.text or self.images or self.files or self.approvals or self.controls
         if self.enabled != selected:
             raise RuntimeConfigurationError(
@@ -231,20 +216,6 @@ class FeishuBinding:
 
 
 @dataclass(frozen=True, slots=True)
-class WorkerIsolation:
-    worker_sid: str
-    scheduled_task_name: str
-    launch_file: Path
-    worker_codex_home: Path
-
-    def __post_init__(self) -> None:
-        if not self.worker_sid.startswith("S-1-"):
-            raise RuntimeConfigurationError("worker_sid must be a Windows SID")
-        if not self.scheduled_task_name.startswith("CodexFeishu-Worker-"):
-            raise RuntimeConfigurationError("isolated worker task name has an invalid prefix")
-
-
-@dataclass(frozen=True, slots=True)
 class RuntimeConfig:
     schema_version: int
     mode: RuntimeMode
@@ -259,7 +230,6 @@ class RuntimeConfig:
     project_name: str | None = None
     codex_projects: CodexProjectAutomation | None = None
     feishu: FeishuBinding | None = None
-    worker_isolation: WorkerIsolation | None = None
     remote: RemoteCapabilities = RemoteCapabilities()
     retention_days: int = 30
     command_ttl_seconds: int = 86_400
@@ -306,15 +276,13 @@ class RuntimeConfig:
                     raise RuntimeConfigurationError("status and backup paths must stay inside workspace_root")
         if self.mode is not RuntimeMode.OFFLINE and not self.codex_executable.is_file():
             raise RuntimeConfigurationError("pinned Codex executable does not exist")
-        if self.mode is not RuntimeMode.OFFLINE and (
-            not self.project_allowlist or not self.thread_allowlist
-        ):
-            raise RuntimeConfigurationError("active modes require project and thread allowlists")
+        if self.mode is not RuntimeMode.OFFLINE and not self.project_allowlist:
+            raise RuntimeConfigurationError("active modes require a project allowlist")
         if _MODE_LEVEL[self.mode] >= _MODE_LEVEL[RuntimeMode.OUTBOUND]:
             if self.feishu is None:
                 raise RuntimeConfigurationError("Feishu binding is required for outbound modes")
-            if not self.project_allowlist or not self.thread_allowlist:
-                raise RuntimeConfigurationError("outbound modes require project and thread allowlists")
+            if not self.project_allowlist:
+                raise RuntimeConfigurationError("outbound modes require a project allowlist")
         if self.feishu is not None:
             contract = self.feishu.endpoint_contract.resolve()
             if not contract.is_file():
@@ -341,19 +309,6 @@ class RuntimeConfig:
                 raise RuntimeConfigurationError(
                     "remote topic routing requires Codex project authority"
                 )
-            if (
-                self.remote.delivery is RemoteDeliveryMode.APP_SERVER
-                and self.worker_isolation is None
-            ):
-                raise RuntimeConfigurationError(
-                    "remote capabilities require a separately-principalled App Server worker"
-                )
-            if self.worker_isolation is not None:
-                launch_file = self.worker_isolation.launch_file.resolve()
-                if not launch_file.is_relative_to(root / ".runtime"):
-                    raise RuntimeConfigurationError(
-                        "isolated worker launch file must stay inside workspace .runtime"
-                    )
 
     def allows(self, capability: RuntimeMode) -> bool:
         return _MODE_LEVEL[self.mode] >= _MODE_LEVEL[capability]
@@ -380,7 +335,6 @@ def load_runtime_config(path: Path) -> RuntimeConfig:
         "paths",
         "allowlist",
         "feishu",
-        "worker_isolation",
         "retention_days",
         "command_ttl_seconds",
         "project_name",
@@ -452,28 +406,6 @@ def load_runtime_config(path: Path) -> RuntimeConfig:
                 else None
             ),
         )
-    worker_raw = raw.get("worker_isolation")
-    worker = None
-    if worker_raw is not None:
-        if not isinstance(worker_raw, dict):
-            raise RuntimeConfigurationError("worker_isolation must be a table")
-        allowed_worker = {
-            "worker_sid",
-            "scheduled_task_name",
-            "launch_file",
-            "worker_codex_home",
-        }
-        extra_worker = set(worker_raw) - allowed_worker
-        if extra_worker:
-            raise RuntimeConfigurationError(f"unknown worker fields: {sorted(extra_worker)}")
-        worker = WorkerIsolation(
-            worker_sid=str(_required(worker_raw, "worker_sid")),
-            scheduled_task_name=str(_required(worker_raw, "scheduled_task_name")),
-            launch_file=(config_path.parent / str(_required(worker_raw, "launch_file"))).resolve(),
-            worker_codex_home=(
-                config_path.parent / str(_required(worker_raw, "worker_codex_home"))
-            ).resolve(),
-        )
     codex_projects_raw = raw.get("codex_projects")
     codex_projects = None
     if codex_projects_raw is not None:
@@ -508,7 +440,6 @@ def load_runtime_config(path: Path) -> RuntimeConfig:
             "auto_approve",
             "delivery",
             "desktop_relay_thread_id",
-            "desktop_relay_thread_title",
             "max_image_bytes",
             "max_file_bytes",
         }
@@ -531,11 +462,6 @@ def load_runtime_config(path: Path) -> RuntimeConfig:
                 if remote_raw.get("desktop_relay_thread_id") is not None
                 else None
             ),
-            desktop_relay_thread_title=(
-                str(remote_raw["desktop_relay_thread_title"])
-                if remote_raw.get("desktop_relay_thread_title") is not None
-                else None
-            ),
             max_image_bytes=int(remote_raw.get("max_image_bytes", 10 * 1024 * 1024)),
             max_file_bytes=int(remote_raw.get("max_file_bytes", 25 * 1024 * 1024)),
         )
@@ -556,7 +482,6 @@ def load_runtime_config(path: Path) -> RuntimeConfig:
         project_name=(str(raw["project_name"]) if raw.get("project_name") is not None else None),
         codex_projects=codex_projects,
         feishu=feishu,
-        worker_isolation=worker,
         remote=remote,
         retention_days=int(raw.get("retention_days", 30)),
         command_ttl_seconds=int(raw.get("command_ttl_seconds", 86_400)),

@@ -5,7 +5,7 @@ Thank you for helping improve Codex Feishu Bridge.
 ## Development workflow
 
 1. Create a focused branch.
-2. Keep provider, protocol, routing, storage, and security changes fail-closed.
+2. Preserve stable-ID routing, exact de-duplication, durable queues, and private credential handling.
 3. Add regression tests for every behavior change and fault path.
 4. Run:
 

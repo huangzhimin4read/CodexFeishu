@@ -90,11 +90,13 @@ class LarkCliUserSender:
                     return value
         return None
 
-    def verify_identity(self, *, expected_open_id: str) -> str:
-        """Fail closed unless the active CLI user is the configured bridge owner."""
+    def verify_ready(self) -> str:
+        """Require only a usable authorized user session.
 
-        if not re.fullmatch(r"ou_[A-Za-z0-9_-]{1,512}", expected_open_id or ""):
-            raise LarkCliUnavailable("configured owner_open_id is invalid")
+        Display names and account choices are intentionally mutable in the
+        single-user local bridge. Stable chat/message IDs handle routing, so a
+        CLI login change must not stop the whole service at startup.
+        """
         command = self._command(
             "--profile",
             self.profile,
@@ -126,7 +128,6 @@ class LarkCliUserSender:
         envelope = self._json_envelope(completed.stdout, completed.stderr)
         identities = envelope.get("identities") if isinstance(envelope, dict) else None
         user = identities.get("user") if isinstance(identities, dict) else None
-        actual_open_id = user.get("openId") if isinstance(user, dict) else None
         ready = (
             completed.returncode == 0
             and envelope is not None
@@ -140,10 +141,6 @@ class LarkCliUserSender:
         if not ready:
             raise LarkCliUnavailable(
                 "authorized lark-cli user identity is unavailable or unverified"
-            )
-        if actual_open_id != expected_open_id:
-            raise LarkCliUnavailable(
-                "authorized lark-cli user does not match configured owner_open_id"
             )
         user_name = user.get("userName")
         return str(user_name) if isinstance(user_name, str) else ""

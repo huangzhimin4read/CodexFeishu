@@ -44,12 +44,20 @@ def prepare(storage: RuntimeStorage) -> None:
     )
 
 
-def event(message_id: str, text: str, *, root=None, parent=None, chat="chat") -> dict:
+def event(
+    message_id: str,
+    text: str,
+    *,
+    root=None,
+    parent=None,
+    chat="chat",
+    sender_open_id="owner",
+) -> dict:
     return {
         "header": {"tenant_key": "tenant", "app_id": "app", "event_id": "e-" + message_id},
         "event": {
             "sender": {
-                "sender_id": {"open_id": "owner"},
+                "sender_id": {"open_id": sender_open_id},
                 "sender_type": "user",
                 "tenant_key": "tenant",
             },
@@ -76,6 +84,17 @@ def test_unquoted_and_known_reply_route_with_frozen_sequence(tmp_path: Path) -> 
         reply = router.ingest(event("m2", "more", root="anchor", parent="anchor"))
         assert reply.routing_state == "routed_reply"
         assert router.ingest(event("m2", "more", root="anchor", parent="anchor")).duplicate
+
+
+def test_any_human_in_the_mapped_chat_can_send_input(tmp_path: Path) -> None:
+    with RuntimeStorage(tmp_path / "db.sqlite") as storage:
+        storage.initialize_runtime(sink_mode="control")
+        prepare(storage)
+        decision = IngressRouter(storage, binding(tmp_path)).ingest(
+            event("m-other", "继续", sender_open_id="ou_another_human")
+        )
+        assert decision.routing_state == "routed_current"
+        assert decision.target_thread_id == "thread"
 
 
 def test_reply_control_is_persisted_as_known_ancestry(tmp_path: Path) -> None:

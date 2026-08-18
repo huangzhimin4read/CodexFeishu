@@ -703,6 +703,46 @@ function Find-CodexRendererBySelectedTitle {
     throw "Expected exactly one background Codex window for task '$ExpectedTitle'; selected=$($selectedMatches.Count), exact-title=$($uniqueTitleCandidates.Count), diagnostics=$detail."
 }
 
+function Find-CodexRendererByComposerValue {
+    param(
+        [int]$ProcessId,
+        [string]$ExpectedComposerValue
+    )
+
+    $matches = @()
+    foreach ($windowHandle in [CodexDesktopNative]::TopLevelWindows([uint32]$ProcessId)) {
+        foreach ($childHandle in [CodexDesktopNative]::Children($windowHandle)) {
+            if ([CodexDesktopNative]::ClassName($childHandle) -ne 'Chrome_RenderWidgetHostHWND') {
+                continue
+            }
+            $accessible = [CodexDesktopNative]::Accessible($childHandle)
+            if (-not $accessible) {
+                continue
+            }
+            $value = Get-AccessibleProperty $accessible 'value'
+            if ($value -like '*initialRoute=*') {
+                continue
+            }
+            $composer = Find-Composer $accessible
+            if (-not $composer) {
+                continue
+            }
+            if ([string](Get-AccessibleProperty $composer 'value') -ne $ExpectedComposerValue) {
+                continue
+            }
+            $matches += [pscustomobject]@{
+                WindowHandle = $windowHandle
+                RendererHandle = $childHandle
+                Renderer = $accessible
+            }
+        }
+    }
+    if ($matches.Count -eq 1) {
+        return $matches[0]
+    }
+    throw "Expected exactly one background Codex window with the prefilled relay prompt; matches=$($matches.Count)."
+}
+
 function Find-Composer {
     param($Renderer)
     return [CodexDesktopNative]::FindAccessible(
@@ -989,9 +1029,6 @@ try {
         [CodexDesktopNative]::SetScreenReaderFlag($true)
     }
     $expectedThreadTitle = Decode-Utf8Base64 $ExpectedThreadTitleBase64
-    if ($BackgroundOnly -and [string]::IsNullOrWhiteSpace($expectedThreadTitle)) {
-        throw 'Background Codex input requires the expected task title.'
-    }
     $text = Decode-Utf8Base64 $TextBase64
     $attachmentJson = Decode-Utf8Base64 $AttachmentsBase64
     $attachments = @()
@@ -1035,9 +1072,8 @@ try {
         }
         $surface = if ($backgroundPrefilledSubmit) {
             try {
-                Find-CodexRendererBySelectedTitle `
+                Find-CodexRendererByComposerValue `
                     -ProcessId $process.Id `
-                    -ExpectedTitle $expectedThreadTitle `
                     -ExpectedComposerValue $text
             }
             catch {
@@ -1045,6 +1081,9 @@ try {
             }
         }
         elseif ($BackgroundOnly) {
+            if ([string]::IsNullOrWhiteSpace($expectedThreadTitle)) {
+                throw 'Background non-submit actions require a task title hint.'
+            }
             Find-CodexRendererBySelectedTitle `
                 -ProcessId $process.Id `
                 -ExpectedTitle $expectedThreadTitle

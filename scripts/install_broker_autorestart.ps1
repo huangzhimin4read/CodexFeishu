@@ -61,17 +61,6 @@ if (-not $SkipLarkCliSetup) {
 
 New-Item -ItemType Directory -Path $brokerRoot -Force | Out-Null
 Copy-Item -LiteralPath $runnerSource -Destination $runner -Force
-& icacls.exe $brokerRoot /inheritance:r | Out-Null
-if ($LASTEXITCODE -ne 0) { throw 'Failed to disable inheritance on broker launcher directory.' }
-& icacls.exe $brokerRoot /grant:r `
-    "*$brokerSid`:(OI)(CI)(F)" `
-    '*S-1-5-18:(OI)(CI)(F)' `
-    '*S-1-5-32-544:(OI)(CI)(F)' | Out-Null
-if ($LASTEXITCODE -ne 0) { throw 'Failed to establish broker launcher ACL.' }
-$worker = Get-LocalUser -Name 'CodexFeishuWorker' -ErrorAction SilentlyContinue
-if ($null -ne $worker) {
-    & icacls.exe $brokerRoot /remove:g "*$($worker.SID.Value)" /T /C | Out-Null
-}
 
 function Quote-TaskArgument([string]$Value) {
     return '"' + $Value.Replace('"', '""') + '"'
@@ -105,7 +94,7 @@ $settings = New-ScheduledTaskSettingsSet `
     -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -Hidden
 $definition = New-ScheduledTask -Action $action -Trigger @($trigger, $watchdogTrigger) `
     -Principal $principal -Settings $settings `
-    -Description 'Owner-only Codex Feishu/Lark Broker; restart after exit or stale health.'
+    -Description 'Single-user Codex Feishu/Lark bridge; restart after exit or stale health.'
 Register-ScheduledTask -TaskName $TaskName -InputObject $definition -Force | Out-Null
 
 $xml = Export-ScheduledTask -TaskName $TaskName

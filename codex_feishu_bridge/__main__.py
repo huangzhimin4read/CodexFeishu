@@ -35,15 +35,6 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument("--config", type=Path, required=True)
     render.add_argument("--account", required=True)
     render.add_argument("--output", type=Path, required=True)
-    render_worker = subcommands.add_parser("render-worker-task")
-    render_worker.add_argument("--launch-file", type=Path, required=True)
-    render_worker.add_argument("--account", required=True)
-    render_worker.add_argument("--working-directory", type=Path, required=True)
-    render_worker.add_argument("--diagnostic-file", type=Path)
-    render_worker.add_argument("--output", type=Path, required=True)
-    worker = subcommands.add_parser("isolated-worker")
-    worker.add_argument("--launch-file", type=Path, required=True)
-    worker.add_argument("--diagnostic-file", type=Path)
     return parser
 
 
@@ -73,55 +64,6 @@ def main() -> int:
 
         restore_backup(args.backup, args.database)
         print(json.dumps({"restored": str(args.database.resolve()), "mode": "reconciliation_only"}))
-        return 0
-    if args.command == "isolated-worker":
-        try:
-            from .codex.isolated_worker import run_worker
-
-            return run_worker(args.launch_file)
-        except BaseException as exc:
-            diagnostic_file = args.diagnostic_file
-            if diagnostic_file is None and sys.platform == "win32":
-                program_data = Path(
-                    __import__("os").environ.get("PROGRAMDATA", r"C:\ProgramData")
-                )
-                diagnostic_file = (
-                    program_data
-                    / "CodexFeishuBridge"
-                    / "worker-diagnostics"
-                    / "last-error.json"
-                )
-            if diagnostic_file is not None:
-                from datetime import UTC, datetime
-
-                message = " ".join(str(exc).split())[:1000]
-                diagnostic = {
-                    "schema": 1,
-                    "captured_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-                    "error_type": type(exc).__name__,
-                    "error_message": message,
-                }
-                target = diagnostic_file.resolve()
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(
-                    json.dumps(diagnostic, ensure_ascii=False, separators=(",", ":")) + "\n",
-                    encoding="utf-8",
-                )
-            raise
-    if args.command == "render-worker-task":
-        from .operations.windows_task import render_worker_task_xml
-
-        xml = render_worker_task_xml(
-            python_executable=Path(sys.executable),
-            launch_file=args.launch_file,
-            account=args.account,
-            working_directory=args.working_directory,
-            diagnostic_file=args.diagnostic_file,
-        )
-        args.output.resolve().parent.mkdir(parents=True, exist_ok=True)
-        with args.output.resolve().open("w", encoding="utf-16", newline="\r\n") as handle:
-            handle.write(xml)
-        print(json.dumps({"rendered": str(args.output.resolve()), "installed": False}))
         return 0
     from .runtime_config import load_runtime_config
 

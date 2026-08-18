@@ -231,7 +231,7 @@ def main() -> int:
                 ),
             },
             "M3.5": {
-                "status": "PASS_LIVE_ISOLATION_PENDING_HARD_STOP",
+                "status": "PASS_LOCAL_PENDING_HARD_STOP",
                 "tests": ["test_approvals_audit_emergency", "test_approval_gateway_dynamic"],
                 "live_evidence": "evidence/LIVE/20260813T123204Z",
                 "remaining_gate": "owner-triggered live hard-stop and sealed installation evidence",
@@ -270,7 +270,7 @@ def main() -> int:
             "completed_external_work": (
                 "Authorized existing Feishu test application configuration, three-project/five-task "
                 "outbound canary, topic-group cutover, image outbound, distinct non-admin Windows "
-                "worker installation, ACL attestation, and remote live preflight; owner-triggered "
+                "single-user local service installation and remote live preflight; user-triggered "
                 "inbound/control/approval canaries remain separately evidenced"
             ),
         },
@@ -291,7 +291,7 @@ def main() -> int:
         "Three-project/five-task Feishu test-tenant outbound canary: PASS_CANARY_OUTBOUND_ONLY.\n\n"
         "Private topic-group outbound cutover: PASS_CANARY_TOPIC_OUTBOUND_ONLY.\n\n"
         "Project-local image forwarding: PASS_CANARY_IMAGE_OUTBOUND_ONLY.\n\n"
-        "Distinct Windows worker installation and startup attestation: PASS_LIVE_ISOLATION.\n\n"
+        "Single-user local service installation and startup: PASS_LOCAL.\n\n"
         "Full M2/M3 sample Gates, live inbound/approval/hard-stop canaries, Broker auto-start, and "
         "seven-day pilot: BLOCKED_EXTERNAL or in progress.\n\n"
         "This package does not claim a production release or a completed live pilot.\n",

@@ -52,15 +52,3 @@ def current_principal() -> PrincipalIdentity:
         return PrincipalIdentity(buffer.value, string_sid.value)
     finally:
         ctypes.windll.kernel32.LocalFree(string_sid)
-
-
-def require_distinct_principals(broker_sid: str, worker_sid: str) -> None:
-    if not broker_sid or not worker_sid or broker_sid.casefold() == worker_sid.casefold():
-        raise IdentityError("broker and full-access worker must use distinct Windows principals")
-
-
-def current_token_is_administrator() -> bool:
-    """Return effective token membership, respecting a filtered UAC token."""
-    if os.name != "nt":
-        raise IdentityError("Windows token inspection is unavailable")
-    return bool(ctypes.windll.shell32.IsUserAnAdmin())

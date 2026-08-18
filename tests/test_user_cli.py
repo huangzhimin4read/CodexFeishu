@@ -105,7 +105,7 @@ def test_lark_cli_discovery_rejects_cmd_shim_without_node_entrypoint(
         LarkCliUserSender.discover(profile="profile-one")
 
 
-def test_lark_cli_user_sender_verifies_configured_owner_identity(tmp_path: Path) -> None:
+def test_lark_cli_user_sender_verifies_ready_identity(tmp_path: Path) -> None:
     def runner(command, **kwargs):
         return subprocess.CompletedProcess(
             command,
@@ -135,10 +135,10 @@ def test_lark_cli_user_sender_verifies_configured_owner_identity(tmp_path: Path)
         runner=runner,
     )
 
-    assert sender.verify_identity(expected_open_id="ou_owner") == "项目所有者"
+    assert sender.verify_ready() == "项目所有者"
 
 
-def test_lark_cli_user_sender_rejects_wrong_authorized_user(tmp_path: Path) -> None:
+def test_lark_cli_user_sender_accepts_any_ready_authorized_user(tmp_path: Path) -> None:
     def runner(command, **kwargs):
         return subprocess.CompletedProcess(
             command,
@@ -166,12 +166,7 @@ def test_lark_cli_user_sender_rejects_wrong_authorized_user(tmp_path: Path) -> N
         runner=runner,
     )
 
-    try:
-        sender.verify_identity(expected_open_id="ou_owner")
-    except RuntimeError as exc:
-        assert "does not match configured owner_open_id" in str(exc)
-    else:
-        raise AssertionError("wrong lark-cli user identity was accepted")
+    assert sender.verify_ready() == ""
 
 
 def test_lark_cli_user_sender_reports_expired_authorization_as_permanent(

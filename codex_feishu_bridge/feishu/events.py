@@ -33,7 +33,7 @@ class EventHandlers:
         try:
             return self.card_callback(_to_dict(event))
         except Exception:
-            # Invalid, expired, duplicate, or drifted actions fail closed while
+            # Invalid, expired, duplicate, or drifted actions are rejected while
             # still returning within the provider callback deadline.
             return {"toast": {"type": "warning", "content": "该操作已失效或未通过校验"}}
 

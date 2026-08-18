@@ -70,7 +70,7 @@ class ApprovalGateway:
         if method not in _APPROVAL_METHODS:
             # Stable App Server methods such as item/tool/call may be valid on
             # the wire while remaining deliberately unavailable to this
-            # owner-only bridge. Reject that one request explicitly; killing
+            # local bridge. Reject that one unsupported request explicitly; killing
             # the shared Broker would strand unrelated Feishu traffic and make
             # a supervisor restart loop without granting any capability.
             self.connection.respond_error(
@@ -259,6 +259,8 @@ class ApprovalGateway:
             or identity["state"] != "active"
             or service is None
             or not isinstance(chat_id, str)
+            or not isinstance(open_id, str)
+            or not open_id
             or not self._active_project_chat(chat_id)
             or not self._approval_is_authorized(
                 str(approval_binding["thread_id"]), approval_binding

@@ -1,4 +1,4 @@
-"""Fail-closed view of the projects and active tasks shown by Codex Desktop."""
+"""Stable-ID view of the projects and active tasks shown by Codex Desktop."""
 
 from __future__ import annotations
 

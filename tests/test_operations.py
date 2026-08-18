@@ -14,10 +14,7 @@ from codex_feishu_bridge.operations.recovery import (
     promote_recovered_database,
 )
 from codex_feishu_bridge.operations.update_gate import UpdateGate, UpdateGateError
-from codex_feishu_bridge.operations.windows_task import (
-    render_task_xml,
-    render_worker_task_xml,
-)
+from codex_feishu_bridge.operations.windows_task import render_task_xml
 from codex_feishu_bridge.runtime_storage import RuntimeStorage
 
 
@@ -97,12 +94,4 @@ def test_scheduled_task_templates_are_hidden_and_least_privilege(tmp_path: Path)
         config_path=tmp_path / "runtime.toml",
         account="DOMAIN\\broker",
     )
-    worker = render_worker_task_xml(
-        python_executable=Path("C:/Python/python.exe"),
-        launch_file=tmp_path / "launch.json",
-        account="DOMAIN\\worker",
-        diagnostic_file=tmp_path / "worker-error.json",
-    )
     assert "LeastPrivilege" in service and "<Hidden>true</Hidden>" in service
-    assert "isolated-worker" in worker and "HighestAvailable" not in worker
-    assert "--diagnostic-file" in worker and "worker-error.json" in worker

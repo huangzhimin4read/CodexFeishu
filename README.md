@@ -2,27 +2,26 @@
 
 [简体中文](README.zh-CN.md) | English
 
-Codex Feishu / Lark Bridge is an owner-operated, Windows-local bridge between OpenAI Codex and Feishu (Lark). It mirrors Codex task output into private Feishu/Lark topic groups and can, behind explicit capability gates, route owner messages, images, files, approvals, and control commands back to the exact Codex task.
+Codex Feishu / Lark Bridge is a single-user, Windows-local bridge between OpenAI Codex and Feishu (Lark). It mirrors Codex task output into private Feishu/Lark topic groups and routes text, images, files, approvals, and control commands from mapped topics back to the exact Codex task.
 
-The project is designed around a fail-closed control plane. Unknown identities, chats, reply ancestry, task bindings, provider delivery results, executable versions, schemas, and approval outcomes are rejected or held for reconciliation instead of being guessed.
+The public project exposes only this relaxed local mode and runs under the current Windows user. Stable tenant, app, project, task, chat, message, and reply IDs determine routing; bot, project, task, group, and user display names may change without stopping the service.
 
-> **Alpha software:** this repository is suitable for development and a carefully controlled single-owner pilot. It is not a hosted service, a multi-user bot platform, or a production certification.
+> **Alpha software:** this repository is intended for one trusted user on one Windows machine. It is not a hosted or multi-user bot platform.
 
 ## Highlights
 
 - **Project and task topics:** activity-triggered private groups for Codex projects, with one Feishu topic per Codex task.
 - **Task lifecycle and title sync:** renaming a Codex task updates the existing Feishu/Lark topic root in place (`task name|project name`) instead of creating a duplicate topic while Feishu still permits that root to be edited. Archiving a Codex task immediately disables its inbound/outbound bridge grant and, when editable, marks that same root `【已归档】`; activating the task again restores the live binding. A provider edit-window or edit-count rejection is persisted as a blocked title projection and is not retried in a loop.
 - **Reliable outbound delivery:** durable SQLite outbox, stable provider UUIDs, retry classification, delivery reconciliation, dead letters, and circuit breakers.
-- **Bidirectional message mirroring:** owner-authored Codex text, images, and path-free file labels are mirrored to the matching Feishu topic. Text can be sent as the authorized Feishu owner through the official `lark-cli`; startup fails closed unless that CLI user's Open ID exactly matches `owner_open_id`. Provider-message ancestry suppresses the resulting Feishu callback, including the send/receive race window, so the mirror cannot re-enter Codex as a new instruction. Bot fallback is visibly labeled with the configured owner display name. The exact user item injected from Feishu is suppressed on its return path using durable `thread + turn + item` identity, so it is neither resubmitted nor displayed twice.
+- **Bidirectional message mirroring:** Codex user text, images, and path-free file labels are mirrored to the matching topic. The official `lark-cli` may send text as whichever authorized user profile is currently ready; startup does not compare that profile with a configured Open ID. Provider-message ancestry and durable `thread + turn + item` identity prevent the resulting callback and Feishu-origin item from looping or appearing twice.
 - **Readable mobile output:** process/final messages, project-local Markdown images, visible Codex image outputs, file-citation labels, and link destinations hidden from provider-visible text.
 - **Obvious handoff state:** commentary remains unobtrusive while Codex keeps running; every final answer ends with a separate `🔔【等待你的回应】` cue so an idle task is unmistakable in the Feishu/Lark topic and mobile preview.
-- **Strict inbound routing:** owner, tenant, app, chat, topic root, ancestry, task epoch, project root, and capability binding are checked before dispatch.
+- **Stable-ID inbound routing:** any human user in a mapped private topic can submit input. Tenant, app, chat, topic root, reply ancestry, and task ID route it; mutable names and the sender's Open ID are not authorization gates.
 - **Remote inputs:** independently gated text, image, and file input. The recommended `cli` mode uses only Codex CLI. If another writer already owns the task, the message remains durably queued for a later CLI retry; this mode never manipulates the Codex Desktop composer. Files are bounded, hashed, stored under the selected project's inbox, and never auto-executed or auto-extracted.
 - **Truthful submission status:** Feishu/Lark reports `submitted` only after the exact Codex user turn is confirmed. If neither writer can be verified, the message remains queued or unconfirmed instead of being claimed as delivered. Feishu's hollow read-status circle is native client UI and cannot be cleared by the bridge or the normal Feishu API.
 - **Exact de-duplication:** source de-duplication never depends on equal message bodies. Rollout item identity, dispatch records, provider outbox identity, and Feishu UUIDs preserve at-most-once visible delivery across retries and restarts.
 - **Approvals and controls:** short-lived single-use approval actions plus scoped status, task, profile, append, stop, and hard-stop commands.
-- **Windows isolation:** provider credentials stay with the broker identity; Codex App Server work can run through a separate non-administrator worker identity with ACL and Job Object boundaries.
-- **Version gates:** the Codex executable and generated stable/experimental App Server schemas are pinned and hashed.
+- **One local process identity:** the bridge and Codex writer run under the current Windows user. `dangerFullAccess`, network access, and `approval_policy = "never"` are supported without a separate worker account.
 
 ## Architecture
 
@@ -38,31 +37,30 @@ Codex Desktop state / rollout files
                                              v
                                    Private project topics
 
-Feishu owner input
+Feishu/Lark topic input
        |
        v
-identity/chat/root/epoch/capability checks
+tenant/app/chat/root/task-ID routing
        |
        v
 Codex CLI resume -> persisted user turn -> exact task
 ```
 
-The bridge is deliberately local. There is no public webhook and no project-wide directory crawl. Project and task identity come from the configured Codex state, while every writable project root remains allowlisted.
+The bridge is deliberately local. There is no public webhook. Project, task, chat, and message IDs are authoritative; display names and project paths are refreshed as mutable metadata. The allowlist only defines routing scope.
 
 ## Requirements
 
 - Windows 10/11 or Windows Server with PowerShell and Task Scheduler
 - Python 3.11 or later
 - An installed Codex CLI/App Server executable
-- For owner-identity mirroring: the official `lark-cli`, authorized for the matching Feishu account; the installer guide detects it and walks through installation, configuration, login, and verification
+- For user-identity mirroring: the official `lark-cli`, with any ready authorized user profile; the installer guide detects it and walks through installation, configuration, login, and verification
 - A Feishu custom app and bot with tenant-approved permissions for the features you enable
 - Windows Credential Manager for the Feishu app secret
 - An interactive Codex desktop session for `delivery = "desktop"` or `delivery = "desktop_relay"`
-- A separate non-administrator Windows account only for the legacy `delivery = "app_server"` compatibility path
 
 Feishu scopes, callback subscriptions, rate limits, and response contracts can change. Treat the example contract as a template and validate it against the current developer-console export for your tenant.
 
-Feishu/Lark currently exposes no supported bot or official `lark-cli` operation for subscribing or unsubscribing one user from one topic. A user becomes subscribed through an actual owner-identity reply in that topic. After confirming a new topic root, the bridge therefore sends one visible `🔔 已订阅任务更新` reply through the verified owner `lark-cli` identity; this is the supported automatic-subscription path and its callback is de-duplicated before Codex dispatch. On Codex archive the bridge enforces the controllable security boundary—traffic disabled, grant revoked, root marked archived—but a user who wants the topic removed from the Feishu subscription list must use **Cancel Subscription** in the Feishu client.
+Feishu/Lark currently exposes no supported bot or official `lark-cli` operation for subscribing or unsubscribing one user from one topic. A user becomes subscribed through an actual user-identity reply in that topic. After confirming a new topic root, the bridge therefore sends one visible `🔔 已订阅任务更新` reply through the ready `lark-cli` profile and de-duplicates its callback before Codex dispatch. On Codex archive the bridge disables traffic and marks the root archived; removing the topic from the Feishu subscription list still requires **Cancel Subscription** in the client.
 
 Feishu also limits message editing to an administrator-defined time window and at most 20 edits per message. Because a topic title is the root message, an older or frequently renamed topic may no longer be renameable through the supported API. The task binding and archive grant still change correctly; the bridge records the provider rejection instead of creating a duplicate replacement topic.
 
@@ -84,7 +82,7 @@ python -m codex_feishu_bridge verify-config --config config/offline.example.toml
 For a real local configuration:
 
 1. Copy `config/runtime.example.toml` or `config/runtime.topic-group.example.toml` into the ignored `.runtime` directory.
-2. Replace every `REPLACE_*` value and keep unapproved endpoints/capabilities disabled.
+2. Replace every `REPLACE_*` value. The topic-group example enables the relaxed local feature set; turn off individual features only when you do not need them.
 3. Export and review the tenant contract, using the corresponding `*.example.json` as a template.
 4. Store the Feishu app secret as a Windows Generic Credential whose target matches `credential_target`. Never place the secret in TOML, JSON, logs, or evidence.
 5. Generate a local Codex schema baseline for the exact executable you will run:
@@ -101,17 +99,17 @@ For a real local configuration:
    python -m codex_feishu_bridge run --config .runtime/runtime.toml
    ```
 
-Remote text, images, files, approvals, and controls are separate booleans and remain disabled until explicitly configured. `delivery = "cli"` uses `codex exec resume` for an unowned task and never invokes the Codex Desktop composer. When another writer owns the task, ingress stays in the durable queue until a later CLI retry can confirm the persisted rollout turn and user-item ID. `delivery = "desktop_relay"` sends every remote user input to one dedicated private Desktop task; that task performs one background cross-task handoff, and its own input/output is excluded from project-topic provisioning and Feishu mirroring. Keep one non-minimized primary Codex window available for the relay and do normal work in other Codex windows; configure the exact relay identity with `desktop_relay_thread_id` and `desktop_relay_thread_title`. The bridge uses Codex Desktop's supported local-task `prompt` deep link, which is handled outside the ordinary second-instance `show/focus` path, and then invokes only that window's Send control. It does not use global keyboard input, the clipboard, or foreground activation. A dispatch is acknowledged only after append-only Codex rollout evidence proves both the exact relay user item and the exact delegated target item; otherwise ingress stays durably queued instead of being retried from an uncertain UI receipt. `desktop` remains the direct UI-automation mode, while the App Server compatibility path still requires a separately principalled worker.
+Remote text, images, files, approvals, and controls are independent feature switches; the relaxed topic-group example enables all five and automatic approvals. `delivery = "cli"` uses `codex exec resume`; a writer lock leaves ingress in the durable queue. `delivery = "desktop_relay"` sends input to one dedicated relay task identified only by `desktop_relay_thread_id`; renaming that task does not affect routing. The bridge prefills that exact task through the local-task prompt deep link and identifies its composer by the unique prompt text, without global keyboard, clipboard, or foreground activation. It acknowledges dispatch only after the relay and target rollout items are both present. `desktop` remains the direct UI-automation alternative, and `app_server` now runs under the same local Windows user.
 
 ## Repository layout
 
 | Path | Purpose |
 | --- | --- |
 | `codex_feishu_bridge/` | Bridge runtime, protocol adapters, storage, security controls, and operations |
-| `config/*.example.*` | Fail-closed configuration and tenant-contract templates |
+| `config/*.example.*` | Relaxed single-user configuration and tenant-contract templates |
 | `generated/codex/` | Pinned Codex App Server schema fixtures and compatibility matrix |
-| `plugins/codex-feishu/` | Optional Codex plugin for guarded status, verification, deployment, and diagnosis workflows |
-| `scripts/` | Baseline generation, evidence, Windows isolation, and service helpers |
+| `plugins/codex-feishu/` | Optional Codex plugin for status, verification, deployment, and diagnosis workflows |
+| `scripts/` | Baseline generation, evidence, installation, and service helpers |
 | `tests/` | Unit, protocol, routing, storage-fault, image, and service tests |
 | `SECURITY.md` | Trust boundaries and vulnerability-reporting rules |
 

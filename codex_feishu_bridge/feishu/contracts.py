@@ -1,4 +1,4 @@
-"""Fail-closed loader for the exported per-tenant endpoint contract."""
+"""Validated loader for the exported per-tenant endpoint contract."""
 
 from __future__ import annotations
 

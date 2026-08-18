@@ -23,7 +23,7 @@ app_id = "REPLACE_APP_ID"
 owner_open_id = "REPLACE_OWNER_OPEN_ID"
 owner_display_name = "REPLACE_OWNER_DISPLAY_NAME"
 # Optional: send Codex-authored user messages through official lark-cli UAT.
-# Startup verifies that the profile's authorized user Open ID equals owner_open_id.
+# Startup verifies only that the selected profile has a ready authorized user.
 #user_message_identity = "lark_cli_user"
 #lark_cli_profile = "REPLACE_LARK_CLI_PROFILE"
 p2p_chat_id = "REPLACE_P2P_CHAT_ID"
@@ -33,15 +33,6 @@ p2p_chat_id = "REPLACE_P2P_CHAT_ID"
 #topic_chat_id = "REPLACE_PRIVATE_TOPIC_GROUP_CHAT_ID"
 credential_target = "CodexFeishu/REPLACE_APP_ID/app_secret"
 endpoint_contract = "tenant-contract.example.json"
-
-# Optional. When present and provisioned under a distinct Windows SID, all
-# App Server traffic uses the isolated worker and dangerFullAccess can pass its
-# identity boundary. The Scheduled Task is an external administrator Gate.
-#[worker_isolation]
-#worker_sid = "S-1-5-21-REPLACE_WORKER_SID"
-#scheduled_task_name = "CodexFeishu-Worker-Owner"
-#launch_file = "D:/CodexFeishuWorker/launch.json"
-#worker_codex_home = "D:/CodexFeishuWorker/codex-home"
 
 # For topic-group remote input, prefer [remote] delivery="cli". It submits
 # through `codex exec resume`, including local images via `--image`, without

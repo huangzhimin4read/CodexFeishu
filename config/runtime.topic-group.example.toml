@@ -16,21 +16,21 @@ backup_root = "../.runtime/topic-group-backups"
 
 [allowlist]
 projects = ["C:/Projects/REPLACE_PROJECT"]
-threads = ["REPLACE_THREAD_ID"]
+threads = []
 
 [codex_projects]
-enabled = false
-activity_after_ms = 0
-primary_project_id = ""
+enabled = true
+activity_after_ms = 1
+primary_project_id = "REPLACE_PRIMARY_CODEX_PROJECT_ID"
 
 [remote]
-enabled = false
-text = false
-images = false
-files = false
-approvals = false
-controls = false
-auto_approve = false
+enabled = true
+text = true
+images = true
+files = true
+approvals = true
+controls = true
+auto_approve = true
 # "cli" (recommended) persists text and images into the exact Codex task with
 # `codex exec resume`, then confirms the new user turn from rollout bytes. If
 # another writer owns the task, ingress stays durably queued for a later CLI
@@ -43,24 +43,14 @@ auto_approve = false
 # through the local-task prompt deep link (whose pure deep-link path does not
 # call show/focus), then invokes its Send control without global keyboard or
 # clipboard input. Exact relay and target rollout items are both required.
-# Set both relay identity fields only with that mode.
+# Set the stable relay task ID only with that mode. Task names are mutable and
+# are never used as identity.
 #desktop_relay_thread_id = "REPLACE_PRIVATE_RELAY_THREAD_ID"
-#desktop_relay_thread_title = "飞书桥接专用中转"
-# "desktop" is the direct UI-automation alternative. "app_server" is the
-# isolated-worker compatibility mode.
+# "desktop" is the direct UI-automation alternative. "app_server" runs under
+# the same local Windows user.
 delivery = "cli"
 max_image_bytes = 10485760
 max_file_bytes = 26214400
-
-# Required only for delivery="app_server". The scheduled task must run as a
-# different, non-administrator Windows account. The worker may access selected
-# Codex state/project roots, but not this bridge's .runtime directory or
-# Windows Credential Manager secret.
-#[worker_isolation]
-#worker_sid = "S-1-5-21-REPLACE-WORKER-SID"
-#scheduled_task_name = "CodexFeishu-Worker-Owner"
-#launch_file = "../.runtime/isolated-worker-launch.json"
-#worker_codex_home = "C:/Users/REPLACE_WORKER/.codex"
 
 [feishu]
 tenant_key = "REPLACE_TENANT_KEY"
@@ -68,7 +58,8 @@ app_id = "REPLACE_APP_ID"
 owner_open_id = "REPLACE_OWNER_OPEN_ID"
 owner_display_name = "REPLACE_OWNER_DISPLAY_NAME"
 # Optional: send Codex-authored user messages through official lark-cli UAT.
-# Startup verifies that the profile's authorized user Open ID equals owner_open_id.
+# Startup verifies only that the selected profile has a ready authorized user.
+# The authorized user may change without editing this file.
 #user_message_identity = "lark_cli_user"
 #lark_cli_profile = "REPLACE_LARK_CLI_PROFILE"
 p2p_chat_id = "REPLACE_FALLBACK_P2P_CHAT_ID"

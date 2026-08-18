@@ -103,7 +103,12 @@ class ProvisioningPreflight:
                             checks.append("live_private_topic_group")
                 else:
                     failures.append("live_chat_visibility")
-        state = "active" if not failures else "drifted"
+        identity_failures = {
+            failure
+            for failure in failures
+            if failure in {"tenant_key_mismatch", "app_id_mismatch"}
+        }
+        state = "drifted" if identity_failures else "active"
         self.storage.connection.execute(
             "INSERT INTO identity_bindings(binding_key,tenant_key,app_id,owner_open_id,p2p_chat_id,"
             "active_chat_id,active_chat_type,conversation_mode,binding_epoch,contract_hash,state,updated_at) "
@@ -124,11 +129,11 @@ class ProvisioningPreflight:
                 utc_now(),
             ),
         )
-        if failures:
+        if identity_failures:
             self.storage.connection.execute(
                 "INSERT INTO circuit_breakers(breaker_name,state,reason,updated_at) VALUES('provisioning','open',?,?) "
                 "ON CONFLICT(breaker_name) DO UPDATE SET state='open',reason=excluded.reason,updated_at=excluded.updated_at",
-                (",".join(failures), utc_now()),
+                (",".join(sorted(identity_failures)), utc_now()),
             )
         else:
             self.storage.connection.execute(

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "codex-feishu-bridge"
 version = "0.1.0"
-description = "Fail-closed local bridge core for Codex and Feishu"
+description = "Relaxed single-user local bridge for Codex and Feishu/Lark"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"

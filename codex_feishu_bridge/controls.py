@@ -24,13 +24,10 @@ class ProfileController:
         storage: RuntimeStorage,
         allowed_roots: tuple[Path, ...],
         default_profile: ExecutionProfile,
-        *,
-        full_access_isolation_verified: bool = False,
     ) -> None:
         self.storage = storage
         self.allowed_roots = allowed_roots
         self.default_profile = default_profile
-        self.full_access_isolation_verified = full_access_isolation_verified
 
     def load(self, thread_id: str) -> ExecutionProfile:
         row = self.storage.connection.execute(
@@ -53,10 +50,6 @@ class ProfileController:
         profile = self.load(thread_id)
         if command.name == "sandbox":
             sandbox = SandboxType(command.argument)
-            if sandbox is SandboxType.DANGER_FULL_ACCESS and not self.full_access_isolation_verified:
-                raise ControlError(
-                    "dangerFullAccess is blocked until the distinct-principal worker Gate passes"
-                )
             profile = replace(
                 profile,
                 sandbox_type=sandbox,

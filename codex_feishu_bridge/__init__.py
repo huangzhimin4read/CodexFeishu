@@ -1,7 +1,7 @@
-"""Owner-operated Codex Desktop to Feishu topic-group bridge.
+"""Single-user Codex Desktop to Feishu/Lark topic-group bridge.
 
-Runtime capability gates keep outbound mirroring, remote input, approvals, and
-control commands independently auditable and fail closed.
+Runtime feature switches keep outbound mirroring, remote input, approvals, and
+control commands independently auditable and durable across restarts.
 """
 
 from .config import BridgeSettings

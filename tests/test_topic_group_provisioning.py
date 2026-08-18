@@ -93,6 +93,14 @@ def test_normal_group_chat_cannot_pass_topic_group_preflight(tmp_path: Path) -> 
         ).run(live=True)
         assert not result.passed
         assert result.failures == ("live_topic_group_shape",)
+        identity = storage.connection.execute(
+            "SELECT state FROM identity_bindings WHERE binding_key='owner'"
+        ).fetchone()
+        assert identity["state"] == "active"
+        breaker = storage.connection.execute(
+            "SELECT state FROM circuit_breakers WHERE breaker_name='provisioning'"
+        ).fetchone()
+        assert breaker["state"] == "closed"
 
 
 def test_legacy_private_thread_form_group_remains_explicitly_supported(tmp_path: Path) -> None:

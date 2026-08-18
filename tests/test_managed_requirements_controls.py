@@ -12,7 +12,7 @@ from codex_feishu_bridge.codex.managed_requirements import (
     ManagedRequirementsError,
 )
 from codex_feishu_bridge.commands import ControlCommand
-from codex_feishu_bridge.controls import ControlError, ProfileController
+from codex_feishu_bridge.controls import ProfileController
 from codex_feishu_bridge.runtime_storage import RuntimeStorage
 
 
@@ -41,7 +41,7 @@ def test_managed_requirements_unknown_field_fails_closed() -> None:
         ManagedRequirements.parse({"requirements": {"futurePolicy": True}}, SCHEMA)
 
 
-def test_profile_controller_persists_full_profile_and_blocks_full_access(tmp_path: Path) -> None:
+def test_profile_controller_persists_and_allows_full_access(tmp_path: Path) -> None:
     with RuntimeStorage(tmp_path / "db.sqlite") as storage:
         storage.initialize_runtime(sink_mode="control")
         default = ExecutionProfile(
@@ -53,5 +53,8 @@ def test_profile_controller_persists_full_profile_and_blocks_full_access(tmp_pat
         controller = ProfileController(storage, (tmp_path,), default)
         profile_hash = controller.apply("thread", ControlCommand("network", "on"))
         assert len(profile_hash) == 64 and controller.load("thread").network_access is True
-        with pytest.raises(ControlError, match="distinct-principal"):
-            controller.apply("thread", ControlCommand("sandbox", "dangerFullAccess"))
+        controller.apply("thread", ControlCommand("sandbox", "dangerFullAccess"))
+        full_access = controller.load("thread")
+        assert full_access.sandbox_type is SandboxType.DANGER_FULL_ACCESS
+        assert full_access.network_access is None
+        assert full_access.writable_roots == ()

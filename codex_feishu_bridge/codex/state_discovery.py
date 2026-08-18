@@ -78,7 +78,7 @@ def discover_rollouts(
             # Codex may archive, move, or recreate a rollout while discovery is
             # enumerating the sessions tree.  The next service loop will read
             # the authoritative path; one vanished candidate must not stop the
-            # entire bridge.  Other I/O and metadata errors remain fail closed.
+            # entire bridge. Other I/O and metadata errors remain visible.
             continue
         found.append(
             RolloutSource(

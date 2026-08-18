@@ -162,7 +162,7 @@ def test_approval_card_binds_to_the_task_project_chat_not_primary_chat(tmp_path:
             {
                 "header": {"tenant_key": "tenant", "app_id": "app"},
                 "event": {
-                    "operator": {"open_id": "owner"},
+                    "operator": {"open_id": "another-human-in-the-private-chat"},
                     "context": {
                         "open_chat_id": "second-chat",
                         "open_message_id": "card-message",

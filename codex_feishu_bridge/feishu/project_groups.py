@@ -65,20 +65,18 @@ class ProjectGroupManager:
         chat_id: str,
         last_activity_ms: int,
     ) -> ProjectGroupResult:
-        """Bind the already approved primary group after a live shape/name check."""
+        """Bind the existing primary group by its stable chat and project IDs."""
         verified = self.client.call(
             "preflight_chat",
             path_parameters={"chat_id": chat_id},
             chat_id=chat_id,
         )
         chat = _chat_data(verified.response)
-        if (
-            verified.outcome is not ProviderOutcome.CONFIRMED
-            or not _is_private_topic_group(verified.response)
-            or chat.get("name") != project.display_name
-        ):
-            raise RuntimeError("primary project group does not match current Codex project")
-        chat_mode = str(chat["chat_mode"])
+        shape_verified = (
+            verified.outcome is ProviderOutcome.CONFIRMED
+            and _is_private_topic_group(verified.response)
+        )
+        chat_mode = str(chat.get("chat_mode") or "topic")
         group_message_type = chat.get("group_message_type")
         if group_message_type is not None:
             group_message_type = str(group_message_type)
@@ -97,7 +95,7 @@ class ProjectGroupManager:
                 "root_paths_json=excluded.root_paths_json,chat_id=excluded.chat_id,"
                 "chat_mode=excluded.chat_mode,group_message_type=excluded.group_message_type,state='active',"
                 "last_activity_ms=MAX(project_groups.last_activity_ms,excluded.last_activity_ms),"
-                "last_error=NULL,updated_at=excluded.updated_at",
+                "last_error=excluded.last_error,updated_at=excluded.updated_at",
                 (
                     project.project_id,
                     project.display_name,
@@ -108,6 +106,15 @@ class ProjectGroupManager:
                     last_activity_ms,
                     now,
                     now,
+                ),
+            )
+            connection.execute(
+                "UPDATE project_groups SET last_error=? WHERE project_id=?",
+                (
+                    None
+                    if shape_verified
+                    else "group_preflight_warning:" + verified.code,
+                    project.project_id,
                 ),
             )
         return ProjectGroupResult(project.project_id, "active", chat_id)
@@ -127,9 +134,16 @@ class ProjectGroupManager:
         if row is not None:
             self._assert_identity(row, project)
             self.storage.connection.execute(
-                "UPDATE project_groups SET last_activity_ms=MAX(last_activity_ms,?),updated_at=? "
+                "UPDATE project_groups SET display_name=?,root_paths_json=?,"
+                "last_activity_ms=MAX(last_activity_ms,?),updated_at=? "
                 "WHERE project_id=?",
-                (last_activity_ms, utc_now(), project.project_id),
+                (
+                    project.display_name,
+                    _roots_json(project),
+                    last_activity_ms,
+                    utc_now(),
+                    project.project_id,
+                ),
             )
             if row["state"] == "active" and row["chat_id"]:
                 return ProjectGroupResult(project.project_id, "active", row["chat_id"])
@@ -214,47 +228,31 @@ class ProjectGroupManager:
             chat_id=chat_id,
         )
         chat = _chat_data(verified.response)
-        if (
+        shape_verified = (
             verified.outcome is ProviderOutcome.CONFIRMED
             and _is_private_topic_group(verified.response)
-            and chat.get("name") == project.display_name
-        ):
-            self.storage.connection.execute(
-                "UPDATE project_groups SET chat_id=?,chat_mode=?,group_message_type=?,"
-                "state='active',last_error=NULL,updated_at=? WHERE project_id=?",
-                (
-                    chat_id,
-                    str(chat["chat_mode"]),
-                    (
-                        str(chat["group_message_type"])
-                        if chat.get("group_message_type") is not None
-                        else None
-                    ),
-                    utc_now(),
-                    project.project_id,
-                ),
-            )
-            return ProjectGroupResult(project.project_id, "active", chat_id, created)
-        if verified.outcome is ProviderOutcome.PERMANENT:
-            state = "failed"
-        else:
-            state = "outcome_unknown"
-        self.storage.connection.execute(
-            "UPDATE project_groups SET chat_id=?,state=?,last_error=?,updated_at=? WHERE project_id=?",
-            (chat_id, state, "group_preflight:" + verified.code, utc_now(), project.project_id),
         )
-        return ProjectGroupResult(project.project_id, state, chat_id, created)
+        self.storage.connection.execute(
+            "UPDATE project_groups SET chat_id=?,chat_mode=?,group_message_type=?,"
+            "state='active',last_error=?,updated_at=? WHERE project_id=?",
+            (
+                chat_id,
+                str(chat.get("chat_mode") or "topic"),
+                (
+                    str(chat["group_message_type"])
+                    if chat.get("group_message_type") is not None
+                    else None
+                ),
+                None if shape_verified else "group_preflight_warning:" + verified.code,
+                utc_now(),
+                project.project_id,
+            ),
+        )
+        return ProjectGroupResult(project.project_id, "active", chat_id, created)
 
     def _assert_identity(self, row: object, project: CatalogProject) -> None:
         if row["project_kind"] != "local":
             raise RuntimeError("project group is not bound to a local Codex project")
-        try:
-            stored_roots = tuple(json.loads(row["root_paths_json"]))
-        except (TypeError, json.JSONDecodeError) as exc:
-            raise RuntimeError("project group roots are corrupt") from exc
-        expected_roots = tuple(str(path) for path in project.root_paths)
-        if row["display_name"] != project.display_name or stored_roots != expected_roots:
-            raise RuntimeError("Codex project identity changed after group binding")
 
     def _mark_unknown(self, project_id: str, reason: str) -> None:
         self.storage.connection.execute(

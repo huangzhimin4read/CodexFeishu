@@ -1,4 +1,4 @@
-"""Fail-closed P2P or topic-group ingress validation and routing."""
+"""Stable-ID P2P or topic-group ingress validation and routing."""
 
 from __future__ import annotations
 
@@ -71,7 +71,6 @@ class IngressRouter:
         if (
             tenant != self.binding.tenant_key
             or app_id != self.binding.app_id
-            or open_id != self.binding.owner_open_id
             or sender_type != "user"
             or sender_tenant != self.binding.tenant_key
             or chat_type != self.binding.target_chat_type

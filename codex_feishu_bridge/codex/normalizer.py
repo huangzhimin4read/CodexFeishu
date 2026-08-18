@@ -22,7 +22,7 @@ class RolloutNormalizer:
     """Converts explicit user-visible assistant and user messages.
 
     Unknown record types are ignored. Assistant messages with an unknown phase
-    fail closed because treating them as commentary or final would be a content
+    are ignored because treating them as commentary or final would be a content
     classification guess. User attachment wrappers are reduced to the request
     plus path-free attachment labels.
     """
