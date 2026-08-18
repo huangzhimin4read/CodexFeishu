@@ -22,10 +22,18 @@ from .user_cli import LarkCliUserSender
 
 _NAMESPACE = uuid.UUID("72f6d750-c92e-54e8-ae48-88cff2d6a9af")
 _WAITING_FOR_REPLY_TEXT = "🔔【等待你的回应】"
-_SUBAGENT_NOTIFICATION = re.compile(
-    r"\A<subagent_notification>.*</subagent_notification>\Z",
-    re.DOTALL,
+_INTERNAL_USER_ENVELOPES = tuple(
+    re.compile(pattern, re.DOTALL)
+    for pattern in (
+        r"\A<subagent_notification>.*</subagent_notification>\Z",
+        r"\A<environment_context>.*</environment_context>\Z",
+    )
 )
+
+
+def _is_internal_user_envelope(text: str) -> bool:
+    stripped = text.strip("\r\n")
+    return any(pattern.fullmatch(stripped) for pattern in _INTERNAL_USER_ENVELOPES)
 
 
 def suppress_queued_internal_user_notifications(storage: RuntimeStorage) -> int:
@@ -42,7 +50,7 @@ def suppress_queued_internal_user_notifications(storage: RuntimeStorage) -> int:
         except (TypeError, json.JSONDecodeError):
             continue
         text = body.get("text") if isinstance(body, dict) else None
-        if isinstance(text, str) and _SUBAGENT_NOTIFICATION.fullmatch(text.strip("\r\n")):
+        if isinstance(text, str) and _is_internal_user_envelope(text):
             suppressed.append(int(row["outbox_id"]))
     if not suppressed:
         return 0
@@ -161,6 +169,8 @@ class OutboundPipeline:
         # back through rollout observation. Other user messages in the same
         # turn (for example a Codex-originated steer) must still be mirrored.
         if event.source_type == "user_message":
+            if _is_internal_user_envelope(event.text):
+                return 0
             returning = connection.execute(
                 "SELECT 1 FROM dispatch_records WHERE thread_id=? AND turn_id=? "
                 "AND user_item_id=? AND state IN ('accepted','completed') LIMIT 1",

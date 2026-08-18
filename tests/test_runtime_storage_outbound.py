@@ -174,6 +174,49 @@ def test_queued_subagent_notification_is_retired_and_releases_following_message(
         assert leased is not None and leased["logical_message_id"] == "visible"
 
 
+@pytest.mark.parametrize(
+    "text",
+    (
+        "<subagent_notification>internal</subagent_notification>",
+        (
+            "<environment_context>\n"
+            "  <current_date>2026-08-18</current_date>\n"
+            "</environment_context>"
+        ),
+    ),
+)
+def test_internal_codex_user_envelope_is_stored_but_not_mirrored(
+    tmp_path: Path,
+    text: str,
+) -> None:
+    with RuntimeStorage(tmp_path / "runtime.db") as storage:
+        storage.initialize_runtime(sink_mode="outbound")
+        _prepare(storage)
+        batch = RolloutBatch(
+            (
+                _event(
+                    EventKind.COMMENTARY,
+                    "internal-context",
+                    text,
+                    source_type="user_message",
+                ),
+            ),
+            SourceCursor("source", "file", 100, "hash", "1"),
+        )
+
+        result = OutboundPipeline(storage, user_messages_as_user=True).ingest_rollout_batch(
+            batch
+        )
+
+        assert result.inserted_items == 1
+        assert result.queued_messages == 0
+        assert storage.connection.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 1
+        assert (
+            storage.connection.execute("SELECT COUNT(*) FROM provider_outbox").fetchone()[0]
+            == 0
+        )
+
+
 def test_codex_user_message_is_mirrored_once_but_exact_feishu_return_is_suppressed(
     tmp_path: Path,
 ) -> None:
