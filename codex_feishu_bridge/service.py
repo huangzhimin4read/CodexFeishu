@@ -70,6 +70,9 @@ class ServiceError(RuntimeError):
     pass
 
 
+_INGRESS_DELIVERY_TIMEOUT_SECONDS = 60
+
+
 class _BorrowedTitleTransport:
     """Expose the shared App Server connection to the title reader.
 
@@ -979,6 +982,7 @@ class BridgeService:
         assert self.ingress is not None and self.controller is not None and self.client is not None
         if getattr(self.config.remote, "uses_cli", False) and self.cli_dispatcher is not None:
             self.cli_dispatcher.recover_abandoned_prestarts()
+        self._expire_stale_ingress()
         rows = self.storage.connection.execute(
             "SELECT i.*,p.text FROM ingress_messages i JOIN ingress_payloads p ON p.message_id=i.message_id "
             "LEFT JOIN dispatch_records d ON d.ingress_message_id=i.message_id "
@@ -1156,6 +1160,39 @@ class BridgeService:
                     row,
                     "该任务当前不满足远程输入的身份、权限或状态条件，消息未执行。",
                 )
+
+    def _expire_stale_ingress(self) -> int:
+        """Stop retrying an uplink that has not reached Codex within one minute."""
+
+        rows = self.storage.connection.execute(
+            "SELECT i.* FROM ingress_messages i "
+            "LEFT JOIN dispatch_records d ON d.ingress_message_id=i.message_id "
+            "LEFT JOIN executed_command_tombstones t ON t.tombstone_key=i.message_id "
+            "WHERE t.tombstone_key IS NULL "
+            "AND i.routing_state IN ('control','routed_current','routed_reply') "
+            "AND datetime(i.received_at)<=datetime('now',?) "
+            "AND (d.ingress_message_id IS NULL OR d.state NOT IN ('accepted','completed')) "
+            "ORDER BY i.ingest_seq LIMIT 100",
+            (f"-{_INGRESS_DELIVERY_TIMEOUT_SECONDS} seconds",),
+        ).fetchall()
+        expired = 0
+        for row in rows:
+            updated = self.storage.connection.execute(
+                "UPDATE ingress_messages SET routing_state='dispatch_rejected',"
+                "dispatch_not_before=NULL,last_dispatch_error='delivery_timeout' "
+                "WHERE tenant_key=? AND app_id=? AND message_id=? "
+                "AND routing_state IN ('control','routed_current','routed_reply')",
+                (row["tenant_key"], row["app_id"], row["message_id"]),
+            )
+            if updated.rowcount != 1:
+                continue
+            expired += 1
+            self._queue_control_ack(
+                row["message_id"],
+                row["target_thread_id"],
+                "⚠ 上行消息投递 Codex 超过 1 分钟仍未成功，已丢弃并停止重试，请重新发送。",
+            )
+        return expired
 
     def _has_blocking_active_turn(self, thread_id: str) -> bool:
         """Keep a thread queued while it has a live Desktop or bridge turn.

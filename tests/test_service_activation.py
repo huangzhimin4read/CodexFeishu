@@ -606,6 +606,64 @@ def test_cli_active_writer_conflict_stays_queued_without_desktop_fallback(
         assert ingress["dispatch_not_before"] is not None
 
 
+def test_uplink_older_than_one_minute_is_discarded_and_user_is_notified(
+    tmp_path: Path,
+) -> None:
+    contract = tmp_path / "contract.json"
+    contract.write_text("{}", encoding="utf-8")
+    with RuntimeStorage(tmp_path / "runtime.db") as storage:
+        storage.initialize_runtime(sink_mode="control")
+        for message_id, received_at, ingest_seq in (
+            ("expired-queued", "datetime('now','-61 seconds')", 1),
+            ("expired-unknown", "datetime('now','-5 minutes')", 2),
+            ("fresh-queued", "datetime('now','-59 seconds')", 3),
+        ):
+            storage.connection.execute(
+                "INSERT INTO ingress_messages(tenant_key,app_id,message_id,chat_id,"
+                "sender_open_id,chat_type,message_type,content_hash,raw_hash,received_at,"
+                "ingest_seq,routing_state,target_thread_id) VALUES('tenant','app',?,"
+                "'topic-chat','owner','group','text',?,?," + received_at + ",?,'routed_reply','thread')",
+                (message_id, "content-" + message_id, "raw-" + message_id, ingest_seq),
+            )
+        storage.connection.execute(
+            "INSERT INTO dispatch_records(dispatch_attempt_id,ingress_message_id,thread_id,"
+            "client_user_message_id,profile_hash,binding_epoch,identity_binding_epoch,"
+            "fencing_token,server_epoch,connection_epoch,request_hash,state,created_at,updated_at) "
+            "VALUES('attempt-expired','expired-unknown','thread','client-expired','profile',"
+            "1,1,1,'server','connection','request','outcome_unknown',datetime('now','-5 minutes'),"
+            "datetime('now','-5 minutes'))"
+        )
+        service = object.__new__(BridgeService)
+        service.storage = storage
+        service.config = SimpleNamespace(
+            feishu=FeishuBinding(
+                "tenant", "app", "owner", "fallback", "target", contract,
+                ConversationMode.TOPIC_GROUP, "topic-chat",
+            )
+        )
+
+        assert service._expire_stale_ingress() == 2
+
+        states = {
+            row["message_id"]: (row["routing_state"], row["last_dispatch_error"])
+            for row in storage.connection.execute(
+                "SELECT message_id,routing_state,last_dispatch_error FROM ingress_messages"
+            )
+        }
+        assert states["expired-queued"] == ("dispatch_rejected", "delivery_timeout")
+        assert states["expired-unknown"] == ("dispatch_rejected", "delivery_timeout")
+        assert states["fresh-queued"] == ("routed_reply", None)
+        receipts = storage.connection.execute(
+            "SELECT logical_message_id,body_json FROM provider_outbox "
+            "WHERE logical_message_id LIKE 'control-ack:expired-%' ORDER BY logical_message_id"
+        ).fetchall()
+        assert [row["logical_message_id"] for row in receipts] == [
+            "control-ack:expired-queued",
+            "control-ack:expired-unknown",
+        ]
+        assert all("超过 1 分钟" in row["body_json"] and "已丢弃" in row["body_json"] for row in receipts)
+
+
 def test_cli_append_active_writer_conflict_stays_queued_without_desktop_fallback(
     tmp_path: Path,
 ) -> None:

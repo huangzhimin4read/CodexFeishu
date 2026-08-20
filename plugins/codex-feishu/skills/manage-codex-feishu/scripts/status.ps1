@@ -29,6 +29,18 @@ if ($projectText -notmatch '(?m)^name\s*=\s*"codex-feishu-bridge"\s*$') {
 
 $checks = [System.Collections.Generic.List[object]]::new()
 
+$liveConfigPath = Join-Path $root ".runtime\live-remote.toml"
+$remoteInboundEnabled = $true
+if (Test-Path -LiteralPath $liveConfigPath -PathType Leaf) {
+    $liveConfigText = Get-Content -LiteralPath $liveConfigPath -Raw -Encoding utf8
+    if ($liveConfigText -match '(?ms)^\[remote\]\s*(.*?)(?=^\[|\z)') {
+        $remoteSection = $Matches[1]
+        if ($remoteSection -match '(?m)^enabled\s*=\s*false\s*$') {
+            $remoteInboundEnabled = $false
+        }
+    }
+}
+
 $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 $taskRunning = $null -ne $task -and [string]$task.State -eq "Running"
 Add-Check $checks "scheduled_task" $taskRunning $(if ($null -eq $task) { "missing" } else { [string]$task.State })
@@ -81,8 +93,20 @@ Add-Check $checks "health_fresh" $healthFresh $(if ($null -eq $healthAge) { "unk
 $processRunning = $null -ne $health -and [string]$health.process_state -eq "running"
 Add-Check $checks "process_state" $processRunning $(if ($null -eq $health) { "unknown" } else { [string]$health.process_state })
 
-$connected = $null -ne $health -and [string]$health.remote_connection_state -eq "connected"
-Add-Check $checks "remote_connection" $connected $(if ($null -eq $health) { "unknown" } else { [string]$health.remote_connection_state })
+$remoteState = if ($null -eq $health) { $null } else { [string]$health.remote_connection_state }
+$connected = if ($remoteInboundEnabled) {
+    $remoteState -eq "connected"
+} else {
+    [string]::IsNullOrWhiteSpace($remoteState)
+}
+$remoteDetail = if ($null -eq $health) {
+    "unknown"
+} elseif (-not $remoteInboundEnabled -and [string]::IsNullOrWhiteSpace($remoteState)) {
+    "paused"
+} else {
+    $remoteState
+}
+Add-Check $checks "remote_connection" $connected $remoteDetail
 
 $breakerCount = if ($null -eq $health -or $null -eq $health.open_breakers) { $null } else { @($health.open_breakers).Count }
 $breakersClear = $breakerCount -eq 0
