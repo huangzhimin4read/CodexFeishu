@@ -30,6 +30,7 @@ class ProviderResult:
     thread_id: str | None = None
     chat_id: str | None = None
     image_key: str | None = None
+    file_key: str | None = None
     retry_after_seconds: float | None = None
     response: dict[str, Any] | None = None
 
@@ -168,6 +169,11 @@ class FeishuClient:
             return ProviderResult(ProviderOutcome.PERMANENT, "missing_image_key_response")
         if image_key is not None and (not isinstance(image_key, str) or not image_key):
             return ProviderResult(ProviderOutcome.PERMANENT, "invalid_image_key_response")
+        file_key = _json_pointer(payload, endpoint.response_file_key_pointer)
+        if endpoint.response_file_key_pointer and file_key is None:
+            return ProviderResult(ProviderOutcome.PERMANENT, "missing_file_key_response")
+        if file_key is not None and (not isinstance(file_key, str) or not file_key):
+            return ProviderResult(ProviderOutcome.PERMANENT, "invalid_file_key_response")
         return ProviderResult(
             ProviderOutcome.CONFIRMED,
             "0",
@@ -175,6 +181,7 @@ class FeishuClient:
             thread_id=thread_id,
             chat_id=response_chat_id,
             image_key=image_key,
+            file_key=file_key,
             response=payload,
         )
 
@@ -225,6 +232,26 @@ class FeishuClient:
             endpoint,
             form_data={"image_type": "message"},
             files={"image": (file_name, content, mime_type)},
+        )
+
+    def upload_file(
+        self,
+        *,
+        file_name: str,
+        file_type: str,
+        mime_type: str,
+        content: bytes,
+    ) -> ProviderResult:
+        """Upload immutable bytes for a later native Feishu file message."""
+        endpoint = self.contract.endpoint("upload_file")
+        if not file_name or not file_type or not mime_type or not content:
+            return ProviderResult(ProviderOutcome.PERMANENT, "invalid_file_upload")
+        if len(content) > 20 * 1024 * 1024:
+            return ProviderResult(ProviderOutcome.PERMANENT, "file_too_large")
+        return self._raw_request(
+            endpoint,
+            form_data={"file_type": file_type, "file_name": file_name},
+            files={"file": (file_name, content, mime_type)},
         )
 
     def download_message_resource(

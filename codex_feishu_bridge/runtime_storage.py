@@ -17,7 +17,7 @@ def utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-RUNTIME_SCHEMA_VERSION = 16
+RUNTIME_SCHEMA_VERSION = 17
 
 
 class RuntimeStorage(BridgeStorage):
@@ -127,6 +127,18 @@ class RuntimeStorage(BridgeStorage):
                 upload_attempt_count INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY(outbox_id,ordinal)
+            );
+            CREATE TABLE IF NOT EXISTS outbound_files (
+                outbox_id INTEGER PRIMARY KEY REFERENCES provider_outbox(outbox_id) ON DELETE CASCADE,
+                source_path TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                mime_type TEXT NOT NULL,
+                provider_file_type TEXT NOT NULL,
+                content BLOB NOT NULL CHECK(length(content)>0 AND length(content)<=20971520),
+                content_hash TEXT NOT NULL,
+                file_key TEXT,
+                upload_attempt_count INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS endpoint_contracts (
                 contract_hash TEXT PRIMARY KEY,
@@ -652,6 +664,62 @@ class RuntimeStorage(BridgeStorage):
             )
             if outbox.rowcount != 1:
                 raise InvalidTransition("image upload staging lost compare-and-swap")
+
+    def file_payload_for_lease(self, outbox_id: int, instance_id: str) -> sqlite3.Row:
+        row = self.connection.execute(
+            "SELECT file.* FROM outbound_files file JOIN provider_outbox outbox "
+            "ON outbox.outbox_id=file.outbox_id WHERE file.outbox_id=? "
+            "AND outbox.state='leased' AND outbox.lease_owner=?",
+            (outbox_id, instance_id),
+        ).fetchone()
+        if row is None:
+            raise InvalidTransition("leased file payload is missing")
+        if row["file_key"] is None:
+            self.connection.execute(
+                "UPDATE outbound_files SET upload_attempt_count=upload_attempt_count+1,updated_at=? "
+                "WHERE outbox_id=?",
+                (utc_now(), outbox_id),
+            )
+        return row
+
+    def stage_uploaded_file(
+        self,
+        outbox_id: int,
+        instance_id: str,
+        file_key: str,
+    ) -> None:
+        if not file_key:
+            raise ValueError("file key must not be empty")
+        body_json = json.dumps(
+            {"_cfb_message_type": "file", "file_key": file_key},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        from hashlib import sha256
+
+        with self.transaction() as connection:
+            updated = connection.execute(
+                "UPDATE outbound_files SET file_key=?,updated_at=? WHERE outbox_id=? "
+                "AND file_key IS NULL",
+                (file_key, utc_now(), outbox_id),
+            )
+            if updated.rowcount != 1:
+                raise InvalidTransition("uploaded file key lost compare-and-swap")
+            outbox = connection.execute(
+                "UPDATE provider_outbox SET body_json=?,body_hash=?,state='retryable',"
+                "next_attempt_at=?,lease_owner=NULL,lease_expires_at=NULL,last_error_code=NULL,updated_at=? "
+                "WHERE outbox_id=? AND state='leased' AND lease_owner=?",
+                (
+                    body_json,
+                    sha256(json.dumps({"file_key": file_key}, separators=(",", ":")).encode()).hexdigest(),
+                    utc_now(),
+                    utc_now(),
+                    outbox_id,
+                    instance_id,
+                ),
+            )
+            if outbox.rowcount != 1:
+                raise InvalidTransition("file upload staging lost compare-and-swap")
 
     def rich_image_payload_for_lease(
         self, outbox_id: int, instance_id: str

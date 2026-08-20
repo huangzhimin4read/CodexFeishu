@@ -114,7 +114,7 @@ class SendReconciler:
                     "interactive"
                     if row["operation"] == "approval"
                     else str(internal_message_type)
-                    if internal_message_type in {"interactive", "post"}
+                    if internal_message_type in {"interactive", "post", "file"}
                     else row["message_type"]
                 )
                 if item.get("msg_type") != expected_type:

@@ -268,6 +268,48 @@ def test_image_upload_uses_contract_bound_multipart_and_returns_image_key(tmp_pa
     assert b'name="image"; filename="chart.png"' in requests[0].content
 
 
+def test_file_upload_uses_contract_bound_multipart_and_returns_file_key(tmp_path: Path) -> None:
+    value = contract_value()
+    value["endpoints"].append(
+        {
+            "name": "upload_file",
+            "method": "POST",
+            "path": "/open-apis/im/v1/files",
+            "exact_scopes": ["im:resource"],
+            "administrator_approved": True,
+            "enabled": True,
+            "response_file_key_pointer": "/data/file_key",
+            "rate_limit": {"capacity": 1, "refill_per_second": 1},
+        }
+    )
+    path = tmp_path / "file-contract.json"
+    path.write_text(json.dumps(value), encoding="utf-8")
+    requests: list[httpx.Request] = []
+    client = FeishuClient(
+        contract=load_tenant_contract(path),
+        app_id="app",
+        credential_target="unused",
+        transport=httpx.MockTransport(
+            lambda request: requests.append(request)
+            or httpx.Response(200, json={"code": 0, "data": {"file_key": "file-key"}})
+        ),
+    )
+    client._tenant_token = "fixture"
+    client._token_expires_at = 10**20
+    result = client.upload_file(
+        file_name="part.step",
+        file_type="stream",
+        mime_type="application/octet-stream",
+        content=b"ISO-10303-21;",
+    )
+    client.close()
+    assert result.outcome is ProviderOutcome.CONFIRMED and result.file_key == "file-key"
+    assert requests[0].url.path == "/open-apis/im/v1/files"
+    assert requests[0].headers["content-type"].startswith("multipart/form-data;")
+    assert b'name="file_type"' in requests[0].content and b"stream" in requests[0].content
+    assert b'name="file"; filename="part.step"' in requests[0].content
+
+
 def test_message_resource_download_is_contract_bound_and_stream_limited(tmp_path: Path) -> None:
     value = contract_value()
     value.update(

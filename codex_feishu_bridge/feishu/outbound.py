@@ -22,6 +22,7 @@ from .formatter import (
     provider_visible_markdown,
     redact_text,
 )
+from .files import LocalFile, extract_local_files
 from .images import LocalImage, extract_local_images
 from .user_cli import LarkCliUserSender
 
@@ -96,6 +97,7 @@ class _OutboundUnit:
     body_json: str
     body_hash: str
     image: LocalImage | None = None
+    file: LocalFile | None = None
     rich_images: tuple[LocalImage, ...] = ()
 
 
@@ -274,6 +276,53 @@ class OutboundPipeline:
                     utc_now(),
                 ),
             )
+        project_root = Path(str(binding["project_root"]))
+        file_parts: list[str | LocalImage] = []
+        candidate_files: list[LocalFile] = []
+        file_failures: list[str] = []
+        text_pieces: list[str] = []
+        for part in extracted.parts:
+            if isinstance(part, LocalImage):
+                file_parts.append(part)
+                text_pieces.append(f"[图片：{part.label or part.file_name}]")
+                continue
+            file_extraction = extract_local_files(part, project_root=project_root)
+            file_parts.append(file_extraction.text)
+            text_pieces.append(file_extraction.text)
+            candidate_files.extend(file_extraction.files)
+            file_failures.extend(file_extraction.failures)
+        for index, reason in enumerate(file_failures, start=1):
+            connection.execute(
+                "INSERT INTO dead_letters(category,record_hash,reason,created_at) VALUES(?,?,?,?)",
+                (
+                    "local_file",
+                    sha256(f"{event.logical_key}:{index}:{reason}".encode()).hexdigest(),
+                    reason,
+                    utc_now(),
+                ),
+            )
+        display_text_with_files = "".join(text_pieces)
+        existing_file_hashes = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT file.content_hash FROM outbound_files file "
+                "JOIN provider_outbox outbox ON outbox.outbox_id=file.outbox_id "
+                "WHERE outbox.thread_id=? AND outbox.turn_id=?",
+                (event.thread_id, event.turn_id),
+            ).fetchall()
+        }
+        files: list[LocalFile] = []
+        event_file_hashes: set[str] = set()
+        for local_file in candidate_files:
+            if local_file.content_hash in event_file_hashes:
+                continue
+            if (
+                local_file.content_hash in existing_file_hashes
+                and event.kind is not EventKind.FINAL_ANSWER
+            ):
+                continue
+            event_file_hashes.add(local_file.content_hash)
+            files.append(local_file)
         candidate_images = list(extracted.images)
         for index, image in enumerate(event.images, start=1):
             candidate_images.append(
@@ -318,7 +367,7 @@ class OutboundPipeline:
         endpoint = "reply_message"
         units: list[_OutboundUnit] = []
         rich_post = (
-            _markdown_card_body(extracted.parts, tuple(images))
+            _markdown_card_body(tuple(file_parts), tuple(images))
             if event.source_type != "user_message"
             else None
         )
@@ -348,13 +397,13 @@ class OutboundPipeline:
         else:
             chunks = (
                 (
-                    format_text_chunks(extracted.text, marker_seed=event.logical_key)
+                    format_text_chunks(display_text_with_files, marker_seed=event.logical_key)
                     if event.source_type == "user_message"
                     else format_markdown_card_chunks(
-                        extracted.text, marker_seed=event.logical_key
+                        display_text_with_files, marker_seed=event.logical_key
                     )
                 )
-                if extracted.text.strip()
+                if display_text_with_files.strip()
                 else ()
             )
             for chunk in chunks:
@@ -368,6 +417,18 @@ class OutboundPipeline:
                         chunk.body_hash,
                     )
                 )
+        for index, local_file in enumerate(files, start=1):
+            logical_id = f"{event.logical_key}:file:{index}"
+            units.append(
+                _OutboundUnit(
+                    logical_id,
+                    "interactive",
+                    "file:" + sha256(logical_id.encode()).hexdigest()[:24],
+                    '{"_cfb_message_type":"file","file_key":null}',
+                    local_file.content_hash,
+                    file=local_file,
+                )
+            )
         standalone_images = [
             image for image in images if image.content_hash not in rich_hashes
         ]
@@ -461,6 +522,22 @@ class OutboundPipeline:
                         unit.image.mime_type,
                         unit.image.content,
                         unit.image.content_hash,
+                        now,
+                    ),
+                )
+            elif unit.file is not None:
+                outbox_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
+                connection.execute(
+                    "INSERT INTO outbound_files(outbox_id,source_path,file_name,mime_type,"
+                    "provider_file_type,content,content_hash,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        outbox_id,
+                        unit.file.source_path,
+                        unit.file.file_name,
+                        unit.file.mime_type,
+                        unit.file.provider_file_type,
+                        unit.file.content,
+                        unit.file.content_hash,
                         now,
                     ),
                 )
@@ -659,11 +736,14 @@ class OutboxWorker:
             row["message_type"] == "interactive"
             and internal_message_type in {"interactive", "post"}
         )
+        is_file_content = (
+            row["message_type"] == "interactive" and internal_message_type == "file"
+        )
         msg_type = (
             "interactive"
             if row["operation"] == "approval"
             else str(internal_message_type)
-            if is_rich_content
+            if is_rich_content or is_file_content
             else row["message_type"]
         )
         if msg_type == "image":
@@ -711,6 +791,38 @@ class OutboxWorker:
                         )
                 return True
             body = {"image_key": str(image["image_key"])}
+        elif is_file_content:
+            file = self.storage.file_payload_for_lease(row["outbox_id"], self.instance_id)
+            if not file["file_key"]:
+                result = self.client.upload_file(
+                    file_name=file["file_name"],
+                    file_type=file["provider_file_type"],
+                    mime_type=file["mime_type"],
+                    content=bytes(file["content"]),
+                )
+                if result.outcome is ProviderOutcome.CONFIRMED and result.file_key:
+                    self.storage.stage_uploaded_file(
+                        row["outbox_id"], self.instance_id, result.file_key
+                    )
+                elif result.outcome in {ProviderOutcome.RETRYABLE, ProviderOutcome.UNKNOWN}:
+                    delay = result.retry_after_seconds or min(
+                        300.0, 2 ** min(int(file["upload_attempt_count"]) + 1, 8)
+                    )
+                    retry_at = (datetime.now(UTC) + timedelta(seconds=delay)).isoformat().replace(
+                        "+00:00", "Z"
+                    )
+                    self.storage.finish_outbox(
+                        row["outbox_id"], self.instance_id, state="retryable",
+                        error_code="file_upload:" + result.code, next_attempt_at=retry_at,
+                    )
+                else:
+                    terminal = "final_undelivered" if row["operation"] == "final" else "permanent"
+                    self.storage.finish_outbox(
+                        row["outbox_id"], self.instance_id, state=terminal,
+                        error_code="file_upload:" + result.code,
+                    )
+                return True
+            body = {"file_key": str(file["file_key"])}
         elif is_rich_content:
             image = self.storage.rich_image_payload_for_lease(
                 row["outbox_id"], self.instance_id
@@ -795,7 +907,7 @@ class OutboxWorker:
         outbound_body_json = json.dumps(
             body, ensure_ascii=False, separators=(",", ":")
         )
-        if is_rich_content:
+        if is_rich_content or is_file_content:
             self.storage.connection.execute(
                 "UPDATE provider_outbox SET body_hash=?,updated_at=? "
                 "WHERE outbox_id=? AND state='leased' AND lease_owner=?",

@@ -35,6 +35,7 @@ def _contract():
             "send_message",
             "reply_message",
             "upload_image",
+            "upload_file",
             "preflight_chat",
         )},
         contract_hash="hash",

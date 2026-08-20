@@ -40,6 +40,16 @@
       "rate_limit": {"capacity": 2, "refill_per_second": 2.0}
     },
     {
+      "name": "upload_file",
+      "method": "POST",
+      "path": "/open-apis/im/v1/files",
+      "exact_scopes": ["im:resource"],
+      "administrator_approved": false,
+      "enabled": false,
+      "response_file_key_pointer": "/data/file_key",
+      "rate_limit": {"capacity": 2, "refill_per_second": 2.0}
+    },
+    {
       "name": "download_message_resource",
       "method": "GET",
       "path": "/open-apis/im/v1/messages/{message_id}/resources/{file_key}",

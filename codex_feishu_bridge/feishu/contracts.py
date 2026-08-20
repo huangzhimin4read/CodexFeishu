@@ -45,6 +45,7 @@ class EndpointContract:
     response_thread_id_pointer: str | None = None
     response_chat_id_pointer: str | None = None
     response_image_key_pointer: str | None = None
+    response_file_key_pointer: str | None = None
     response_binary: bool = False
 
     def __post_init__(self) -> None:
@@ -77,6 +78,16 @@ class EndpointContract:
             ):
                 raise ContractError(
                     "upload_image must bind POST, exact im:resource scope, and a response image key"
+                )
+        if self.enabled and self.name == "upload_file":
+            if (
+                self.method != "POST"
+                or self.path != "/open-apis/im/v1/files"
+                or self.exact_scopes != ("im:resource",)
+                or not self.response_file_key_pointer
+            ):
+                raise ContractError(
+                    "upload_file must bind the official POST endpoint, exact im:resource scope, and a response file key"
                 )
         if self.enabled and self.name == "download_message_resource":
             if (
@@ -158,6 +169,7 @@ _ENDPOINT_FIELDS = {
     "response_thread_id_pointer",
     "response_chat_id_pointer",
     "response_image_key_pointer",
+    "response_file_key_pointer",
     "response_binary",
     "rate_limit",
 }
@@ -247,6 +259,11 @@ def load_tenant_contract(path: Path) -> TenantContract:
             response_image_key_pointer=(
                 str(item["response_image_key_pointer"])
                 if item.get("response_image_key_pointer")
+                else None
+            ),
+            response_file_key_pointer=(
+                str(item["response_file_key_pointer"])
+                if item.get("response_file_key_pointer")
                 else None
             ),
             response_binary=bool(item.get("response_binary", False)),

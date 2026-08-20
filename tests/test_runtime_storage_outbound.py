@@ -1014,7 +1014,7 @@ def test_runtime_v2_database_is_upgraded_without_rebinding(tmp_path: Path) -> No
         assert (row["active_chat_id"], row["conversation_mode"]) == ("legacy-chat", "p2p")
         assert storage.connection.execute(
             "SELECT value FROM runtime_metadata WHERE key='runtime_schema_version'"
-        ).fetchone()[0] == "16"
+        ).fetchone()[0] == "17"
         columns = {
             row[1]
             for row in storage.connection.execute("PRAGMA table_info(task_bindings)").fetchall()
@@ -1218,6 +1218,87 @@ def test_local_markdown_image_is_uploaded_then_replied_in_task_topic(tmp_path: P
             "SELECT COUNT(*) FROM transient_messages WHERE message_id IN "
             "('message-1','message-2','message-3')"
         ).fetchone()[0] == 0
+
+
+def test_small_pdf_and_step_are_uploaded_then_sent_as_native_file_messages(
+    tmp_path: Path,
+) -> None:
+    class RecordingClient:
+        def __init__(self) -> None:
+            self.uploads: list[dict] = []
+            self.calls: list[tuple[str, dict]] = []
+
+        def upload_file(self, **kwargs):
+            self.uploads.append(kwargs)
+            return ProviderResult(
+                ProviderOutcome.CONFIRMED,
+                "0",
+                file_key=f"file-{len(self.uploads)}",
+            )
+
+        def call(self, endpoint: str, **kwargs):
+            self.calls.append((endpoint, kwargs))
+            return ProviderResult(
+                ProviderOutcome.CONFIRMED,
+                "0",
+                message_id=f"message-{len(self.calls)}",
+                thread_id="provider-thread",
+            )
+
+    project = tmp_path / "project"
+    project.mkdir()
+    pdf = project / "drawing.pdf"
+    step = project / "part.step"
+    pdf.write_bytes(b"%PDF-1.7\nfixture")
+    step.write_bytes(b"ISO-10303-21;\nEND-ISO-10303-21;")
+    with RuntimeStorage(tmp_path / "runtime.db") as storage:
+        storage.initialize_runtime(sink_mode="outbound")
+        storage.connection.execute(
+            "INSERT INTO task_bindings(thread_id,project_root,chat_id,anchor_message_id,anchor_state,"
+            "anchor_uuid,anchor_marker,conversation_mode,opted_in,updated_at) "
+            "VALUES('thread',?,'chat','anchor','confirmed','uuid','marker','topic_group',1,?)",
+            (str(project), utc_now()),
+        )
+        event = _event(
+            EventKind.FINAL_ANSWER,
+            "file-item",
+            f'交付如下：\n[加工图]({pdf})\n:codex-file-citation{{path="{step}" purpose="output"}}',
+        )
+        result = OutboundPipeline(storage).ingest_rollout_batch(
+            RolloutBatch((event,), SourceCursor("source", "file", 100, "hash", "1"))
+        )
+        assert result.queued_messages == 4
+        rows = storage.connection.execute(
+            "SELECT operation,message_type,body_json FROM provider_outbox ORDER BY outbox_id"
+        ).fetchall()
+        assert [json.loads(row["body_json"]).get("_cfb_message_type") for row in rows] == [
+            "interactive", "file", "file", None
+        ]
+        assert str(pdf) not in rows[0]["body_json"] and str(step) not in rows[0]["body_json"]
+        stored = storage.connection.execute(
+            "SELECT file_name,provider_file_type,content,file_key FROM outbound_files ORDER BY outbox_id"
+        ).fetchall()
+        assert [(row["file_name"], row["provider_file_type"]) for row in stored] == [
+            ("drawing.pdf", "pdf"), ("part.step", "stream")
+        ]
+
+        client = RecordingClient()
+        worker = OutboxWorker(storage, client, "worker")
+        assert worker.run_once()  # Markdown body
+        assert worker.run_once()  # PDF upload
+        assert len(client.calls) == 1
+        assert worker.run_once()  # PDF message
+        assert json.loads(client.calls[-1][1]["json_body"]["content"]) == {
+            "file_key": "file-1"
+        }
+        assert client.calls[-1][1]["json_body"]["msg_type"] == "file"
+        assert worker.run_once()  # STEP upload
+        assert worker.run_once()  # STEP message
+        assert client.uploads[-1]["file_type"] == "stream"
+        assert worker.run_once()  # waiting cue
+        assert storage.connection.execute(
+            "SELECT COUNT(*) FROM provider_outbox WHERE state='confirmed'"
+        ).fetchone()[0] == 4
 
 
 def test_local_image_can_be_recovered_idempotently_after_content_is_corrected(

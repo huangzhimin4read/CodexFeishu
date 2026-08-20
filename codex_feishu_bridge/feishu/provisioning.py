@@ -62,6 +62,7 @@ class ProvisioningPreflight:
             "send_message",
             "reply_message",
             "upload_image",
+            "upload_file",
             "preflight_chat",
         }
         if remote.images or remote.files:
