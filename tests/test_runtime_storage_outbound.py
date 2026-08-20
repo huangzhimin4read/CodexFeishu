@@ -973,7 +973,7 @@ def test_runtime_v2_database_is_upgraded_without_rebinding(tmp_path: Path) -> No
         assert (row["active_chat_id"], row["conversation_mode"]) == ("legacy-chat", "p2p")
         assert storage.connection.execute(
             "SELECT value FROM runtime_metadata WHERE key='runtime_schema_version'"
-        ).fetchone()[0] == "15"
+        ).fetchone()[0] == "16"
         columns = {
             row[1]
             for row in storage.connection.execute("PRAGMA table_info(task_bindings)").fetchall()
@@ -1115,44 +1115,54 @@ def test_local_markdown_image_is_uploaded_then_replied_in_task_topic(tmp_path: P
             (str(project), utc_now()),
         )
         batch = RolloutBatch(
-            (_event(EventKind.FINAL_ANSWER, "image-item", f"结果\n![曲线](<{image}>)"),),
+            (_event(EventKind.FINAL_ANSWER, "image-item", f"前文\n![曲线](<{image}>)\n后文"),),
             SourceCursor("source", "file", 100, "hash", "1"),
         )
         result = OutboundPipeline(storage).ingest_rollout_batch(batch)
-        assert result.queued_messages == 3
+        assert result.queued_messages == 2
         rows = storage.connection.execute(
             "SELECT outbox_id,operation,message_type,body_json,state FROM provider_outbox "
             "ORDER BY outbox_id"
         ).fetchall()
         assert [(row["operation"], row["message_type"]) for row in rows] == [
-            ("commentary", "text"),
-            ("commentary", "image"),
+            ("commentary", "interactive"),
             ("final", "text"),
         ]
         assert str(image) not in rows[0]["body_json"]
-        assert "图片：曲线" in rows[0]["body_json"]
+        rich_body = json.loads(rows[0]["body_json"])
+        assert rich_body["_cfb_message_type"] == "post"
+        assert [paragraph[0]["tag"] for paragraph in rich_body["zh_cn"]["content"]] == [
+            "text",
+            "img",
+            "text",
+        ]
         assert json.loads(rows[-1]["body_json"])["text"] == "🔔【等待你的回应】"
         stored = storage.connection.execute(
-            "SELECT file_name,mime_type,content,content_hash,image_key FROM outbound_images"
+            "SELECT file_name,mime_type,content,content_hash,image_key "
+            "FROM outbound_rich_images"
         ).fetchone()
         assert stored["file_name"] == "plot.png" and stored["mime_type"] == "image/png"
         assert bytes(stored["content"]) == image.read_bytes() and stored["image_key"] is None
 
         client = RecordingClient()
         worker = OutboxWorker(storage, client, "worker")
-        assert worker.run_once()  # visible text
-        assert worker.run_once()  # durable upload phase
+        assert worker.run_once()  # durable upload phase; no partial post is visible
         assert client.uploads[0]["content"] == image.read_bytes()
         image_row = storage.connection.execute(
-            "SELECT state,body_json FROM provider_outbox WHERE message_type='image'"
+            "SELECT state,body_json FROM provider_outbox WHERE message_type='interactive'"
         ).fetchone()
         assert image_row["state"] == "retryable"
-        assert json.loads(image_row["body_json"]) == {"image_key": "img-fixture"}
-        assert worker.run_once()  # image reply using the persisted image_key
-        assert client.calls[-1][1]["json_body"]["msg_type"] == "image"
-        assert json.loads(client.calls[-1][1]["json_body"]["content"]) == {
-            "image_key": "img-fixture"
+        assert worker.run_once()  # one rich post after every image key is durable
+        assert client.calls[-1][1]["json_body"]["msg_type"] == "post"
+        sent_post = json.loads(client.calls[-1][1]["json_body"]["content"])
+        assert "_cfb_message_type" not in sent_post
+        assert sent_post["zh_cn"]["content"][1][0] == {
+            "tag": "img",
+            "image_key": "img-fixture",
         }
+        assert [
+            sent_post["zh_cn"]["content"][index][0]["text"] for index in (0, 2)
+        ] == ["前文", "后文"]
         assert client.calls[-1][1]["json_body"]["reply_in_thread"] is True
         assert worker.run_once()  # waiting-for-reply cue
         assert json.loads(client.calls[-1][1]["json_body"]["content"])["text"] == (
@@ -1201,7 +1211,7 @@ def test_local_image_can_be_recovered_idempotently_after_content_is_corrected(
         assert recovered == 1
         assert storage.connection.execute("SELECT COUNT(*) FROM provider_outbox").fetchone()[0] == 3
         stored = storage.connection.execute(
-            "SELECT file_name,mime_type,content FROM outbound_images"
+            "SELECT file_name,mime_type,content FROM outbound_rich_images"
         ).fetchone()
         assert tuple(stored[:2]) == ("camera-export.jpg", "image/jpeg")
         assert bytes(stored["content"]) == image.read_bytes()
@@ -1249,28 +1259,30 @@ def test_final_markdown_image_is_resent_after_matching_commentary_image(tmp_path
                 SourceCursor("source", "file", 100, "hash", "1"),
             )
         )
-        assert result.inserted_items == 2 and result.queued_messages == 4
+        assert result.inserted_items == 2 and result.queued_messages == 3
         rows = storage.connection.execute(
             "SELECT operation,message_type,body_json FROM provider_outbox ORDER BY outbox_id"
         ).fetchall()
         assert [(row["operation"], row["message_type"]) for row in rows] == [
             ("commentary", "image"),
-            ("commentary", "text"),
-            ("commentary", "image"),
+            ("commentary", "interactive"),
             ("final", "text"),
         ]
-        assert "图片：结果" in rows[1]["body_json"]
+        assert json.loads(rows[1]["body_json"])["_cfb_message_type"] == "post"
         assert json.loads(rows[-1]["body_json"])["text"] == "🔔【等待你的回应】"
         stored = storage.connection.execute(
             "SELECT source_path,file_name,mime_type,content,content_hash FROM outbound_images"
         ).fetchall()
-        assert len(stored) == 2
+        assert len(stored) == 1
         assert stored[0]["source_path"].startswith("rollout://thread/turn/tool-image/")
         assert stored[0]["file_name"].endswith(".png")
         assert bytes(stored[0]["content"]) == content
-        assert stored[1]["source_path"].endswith("same.png")
-        assert stored[1]["file_name"] == "same.png"
-        assert bytes(stored[1]["content"]) == content
+        rich = storage.connection.execute(
+            "SELECT source_path,file_name,content FROM outbound_rich_images"
+        ).fetchone()
+        assert rich["source_path"].endswith("same.png")
+        assert rich["file_name"] == "same.png"
+        assert bytes(rich["content"]) == content
 
 
 def test_unknown_image_upload_is_retried_without_sending_a_visible_message(

@@ -17,7 +17,7 @@ def utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-RUNTIME_SCHEMA_VERSION = 15
+RUNTIME_SCHEMA_VERSION = 16
 
 
 class RuntimeStorage(BridgeStorage):
@@ -114,6 +114,19 @@ class RuntimeStorage(BridgeStorage):
                 image_key TEXT,
                 upload_attempt_count INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS outbound_rich_images (
+                outbox_id INTEGER NOT NULL REFERENCES provider_outbox(outbox_id) ON DELETE CASCADE,
+                ordinal INTEGER NOT NULL CHECK(ordinal>0),
+                source_path TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                mime_type TEXT NOT NULL,
+                content BLOB NOT NULL CHECK(length(content)>0 AND length(content)<=10485760),
+                content_hash TEXT NOT NULL,
+                image_key TEXT,
+                upload_attempt_count INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(outbox_id,ordinal)
             );
             CREATE TABLE IF NOT EXISTS endpoint_contracts (
                 contract_hash TEXT PRIMARY KEY,
@@ -639,6 +652,54 @@ class RuntimeStorage(BridgeStorage):
             )
             if outbox.rowcount != 1:
                 raise InvalidTransition("image upload staging lost compare-and-swap")
+
+    def rich_image_payload_for_lease(
+        self, outbox_id: int, instance_id: str
+    ) -> sqlite3.Row | None:
+        """Return the next not-yet-uploaded image for one leased rich post."""
+
+        row = self.connection.execute(
+            "SELECT image.* FROM outbound_rich_images image JOIN provider_outbox outbox "
+            "ON outbox.outbox_id=image.outbox_id WHERE image.outbox_id=? "
+            "AND image.image_key IS NULL AND outbox.state='leased' "
+            "AND outbox.lease_owner=? ORDER BY image.ordinal LIMIT 1",
+            (outbox_id, instance_id),
+        ).fetchone()
+        if row is not None:
+            self.connection.execute(
+                "UPDATE outbound_rich_images SET upload_attempt_count=upload_attempt_count+1,"
+                "updated_at=? WHERE outbox_id=? AND ordinal=? AND image_key IS NULL",
+                (utc_now(), outbox_id, row["ordinal"]),
+            )
+        return row
+
+    def stage_uploaded_rich_image(
+        self,
+        outbox_id: int,
+        instance_id: str,
+        ordinal: int,
+        image_key: str,
+    ) -> None:
+        """Persist one uploaded key and release the rich post for its next phase."""
+
+        if not image_key:
+            raise ValueError("image key must not be empty")
+        with self.transaction() as connection:
+            updated = connection.execute(
+                "UPDATE outbound_rich_images SET image_key=?,updated_at=? "
+                "WHERE outbox_id=? AND ordinal=? AND image_key IS NULL",
+                (image_key, utc_now(), outbox_id, ordinal),
+            )
+            if updated.rowcount != 1:
+                raise InvalidTransition("rich image key lost compare-and-swap")
+            outbox = connection.execute(
+                "UPDATE provider_outbox SET state='retryable',next_attempt_at=?,"
+                "lease_owner=NULL,lease_expires_at=NULL,last_error_code=NULL,updated_at=? "
+                "WHERE outbox_id=? AND state='leased' AND lease_owner=?",
+                (utc_now(), utc_now(), outbox_id, instance_id),
+            )
+            if outbox.rowcount != 1:
+                raise InvalidTransition("rich image upload staging lost compare-and-swap")
 
     def lease_outbox(self, instance_id: str, lease_until: str) -> sqlite3.Row | None:
         self.ensure_writable_sink()

@@ -101,8 +101,20 @@ class SendReconciler:
                         continue
                 elif sender_type not in {"app", "bot"} or sender_id != self.client.app_id:
                     continue
+                try:
+                    persisted_body = json.loads(row["body_json"])
+                except (TypeError, json.JSONDecodeError):
+                    persisted_body = None
+                is_rich_post = (
+                    isinstance(persisted_body, dict)
+                    and persisted_body.get("_cfb_message_type") == "post"
+                )
                 expected_type = (
-                    "interactive" if row["operation"] == "approval" else row["message_type"]
+                    "interactive"
+                    if row["operation"] == "approval"
+                    else "post"
+                    if is_rich_post
+                    else row["message_type"]
                 )
                 if item.get("msg_type") != expected_type:
                     continue

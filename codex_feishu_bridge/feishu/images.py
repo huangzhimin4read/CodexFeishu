@@ -33,6 +33,7 @@ class ImageExtraction:
     text: str
     images: tuple[LocalImage, ...]
     failures: tuple[str, ...]
+    parts: tuple[str | LocalImage, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,23 +150,40 @@ def extract_local_images(text: str, *, project_root: Path) -> ImageExtraction:
     images: list[LocalImage] = []
     failures: list[str] = []
     pieces: list[str] = []
+    parts: list[str | LocalImage] = []
     position = 0
     for match in _markdown_images(text):
-        pieces.append(text[position : match.start])
+        preceding = text[position : match.start]
+        pieces.append(preceding)
+        if preceding:
+            parts.append(preceding)
         alt = match.alt
         target = match.target
         try:
             candidate = _local_target(target, project_root)
             if candidate is None:
                 pieces.append(match.raw)
+                parts.append(match.raw)
             else:
                 image = _read_local_image(candidate, project_root.resolve(strict=True), alt)
                 images.append(image)
-                pieces.append(f"[图片：{alt or image.file_name}]")
+                label = f"[图片：{alt or image.file_name}]"
+                pieces.append(label)
+                parts.append(image)
         except (OSError, ValueError, PathValidationError) as exc:
             reason = str(exc) or type(exc).__name__
             failures.append(reason)
-            pieces.append(f"[本地图片未转发：{alt or '未命名图片'}（{reason}）]")
+            failure = f"[本地图片未转发：{alt or '未命名图片'}（{reason}）]"
+            pieces.append(failure)
+            parts.append(failure)
         position = match.end
-    pieces.append(text[position:])
-    return ImageExtraction("".join(pieces), tuple(images), tuple(failures))
+    trailing = text[position:]
+    pieces.append(trailing)
+    if trailing:
+        parts.append(trailing)
+    return ImageExtraction(
+        "".join(pieces),
+        tuple(images),
+        tuple(failures),
+        tuple(parts),
+    )

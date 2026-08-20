@@ -15,7 +15,12 @@ from ..codex.desktop_relay_dispatch import matches_desktop_relay_submission
 from ..models import EventKind, NormalizedEvent, RolloutBatch
 from ..runtime_storage import RuntimeStorage, utc_now
 from .client import FeishuClient, ProviderOutcome, ProviderResult
-from .formatter import format_text_chunks, invisible_marker
+from .formatter import (
+    format_text_chunks,
+    invisible_marker,
+    provider_visible_text,
+    redact_text,
+)
 from .images import LocalImage, extract_local_images
 from .user_cli import LarkCliUserSender
 
@@ -80,6 +85,69 @@ def stable_uuid(material: str, *, chat_id: str, conversation_mode: str) -> str:
 class EnqueueResult:
     inserted_items: int
     queued_messages: int
+
+
+@dataclass(frozen=True, slots=True)
+class _OutboundUnit:
+    logical_id: str
+    message_type: str
+    marker: str
+    body_json: str
+    body_hash: str
+    image: LocalImage | None = None
+    rich_images: tuple[LocalImage, ...] = ()
+
+
+def _rich_post_body(
+    parts: tuple[str | LocalImage, ...],
+    active_images: tuple[LocalImage, ...],
+) -> tuple[str, tuple[LocalImage, ...]] | None:
+    """Build one ordered Feishu post when local images sit inside visible text."""
+
+    active_hashes = {image.content_hash for image in active_images}
+    used_hashes: set[str] = set()
+    post_images: list[LocalImage] = []
+    content: list[list[dict[str, object]]] = []
+    has_visible_text = False
+
+    def append_text(value: str) -> None:
+        nonlocal has_visible_text
+        safe = provider_visible_text(redact_text(value))
+        if not safe:
+            return
+        has_visible_text = True
+        for line in safe.splitlines():
+            content.append([{"tag": "text", "text": line or " "}])
+
+    for part in parts:
+        if isinstance(part, str):
+            append_text(part)
+            continue
+        if part.content_hash not in active_hashes or part.content_hash in used_hashes:
+            append_text(f"[图片：{part.label or part.file_name}]")
+            continue
+        used_hashes.add(part.content_hash)
+        post_images.append(part)
+        content.append(
+            [
+                {
+                    "tag": "img",
+                    "image_key": None,
+                    "_cfb_image_ordinal": len(post_images),
+                }
+            ]
+        )
+
+    if not has_visible_text or not post_images:
+        return None
+    body = {
+        "_cfb_message_type": "post",
+        "zh_cn": {"title": "", "content": content},
+    }
+    body_json = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
+    if len(body_json.encode("utf-8")) > 18_000:
+        return None
+    return body_json, tuple(post_images)
 
 
 class OutboundPipeline:
@@ -201,11 +269,6 @@ class OutboundPipeline:
                     utc_now(),
                 ),
             )
-        chunks = (
-            format_text_chunks(extracted.text, marker_seed=event.logical_key)
-            if extracted.text.strip()
-            else ()
-        )
         candidate_images = list(extracted.images)
         for index, image in enumerate(event.images, start=1):
             candidate_images.append(
@@ -225,8 +288,11 @@ class OutboundPipeline:
             for row in connection.execute(
                 "SELECT image.content_hash FROM outbound_images image "
                 "JOIN provider_outbox outbox ON outbox.outbox_id=image.outbox_id "
+                "WHERE outbox.thread_id=? AND outbox.turn_id=? UNION "
+                "SELECT image.content_hash FROM outbound_rich_images image "
+                "JOIN provider_outbox outbox ON outbox.outbox_id=image.outbox_id "
                 "WHERE outbox.thread_id=? AND outbox.turn_id=?",
-                (event.thread_id, event.turn_id),
+                (event.thread_id, event.turn_id, event.thread_id, event.turn_id),
             ).fetchall()
         }
         images: list[LocalImage] = []
@@ -245,14 +311,68 @@ class OutboundPipeline:
         now = utc_now()
         priority = 100 if event.kind is EventKind.FINAL_ANSWER else 10
         endpoint = "reply_message"
-        units: list[tuple[str, str, str, str, LocalImage | None]] = []
-        for chunk in chunks:
-            logical_id = f"{event.logical_key}:{chunk.index}"
-            units.append((logical_id, "text", chunk.marker, chunk.body_json, None))
-        for index, image in enumerate(images, start=1):
+        units: list[_OutboundUnit] = []
+        rich_post = (
+            _rich_post_body(extracted.parts, tuple(images))
+            if event.source_type != "user_message"
+            else None
+        )
+        rich_hashes: set[str] = set()
+        if rich_post is not None:
+            body_json, rich_images = rich_post
+            rich_hashes = {image.content_hash for image in rich_images}
+            logical_id = f"{event.logical_key}:rich"
+            units.append(
+                _OutboundUnit(
+                    logical_id,
+                    "interactive",
+                    invisible_marker(
+                        "cfb:" + sha256(logical_id.encode()).hexdigest()[:24]
+                    ),
+                    body_json,
+                    sha256(
+                        body_json.encode("utf-8")
+                        + b"\x00"
+                        + b"\x00".join(
+                            image.content_hash.encode("ascii") for image in rich_images
+                        )
+                    ).hexdigest(),
+                    rich_images=rich_images,
+                )
+            )
+        else:
+            chunks = (
+                format_text_chunks(extracted.text, marker_seed=event.logical_key)
+                if extracted.text.strip()
+                else ()
+            )
+            for chunk in chunks:
+                logical_id = f"{event.logical_key}:{chunk.index}"
+                units.append(
+                    _OutboundUnit(
+                        logical_id,
+                        "text",
+                        chunk.marker,
+                        chunk.body_json,
+                        chunk.body_hash,
+                    )
+                )
+        standalone_images = [
+            image for image in images if image.content_hash not in rich_hashes
+        ]
+        for index, image in enumerate(standalone_images, start=1):
             logical_id = f"{event.logical_key}:image:{index}"
             marker = "img:" + sha256(logical_id.encode()).hexdigest()[:24]
-            units.append((logical_id, "image", marker, '{"image_key":null}', image))
+            units.append(
+                _OutboundUnit(
+                    logical_id,
+                    "image",
+                    marker,
+                    '{"image_key":null}',
+                    image.content_hash,
+                    image=image,
+                )
+            )
         if event.kind is EventKind.FINAL_ANSWER:
             # Keep the attention cue as the final provider message so Feishu's
             # topic preview and the bottom of the conversation both make the
@@ -267,22 +387,23 @@ class OutboundPipeline:
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
-            units.append((logical_id, "text", marker, body_json, None))
+            units.append(
+                _OutboundUnit(
+                    logical_id,
+                    "text",
+                    marker,
+                    body_json,
+                    sha256(body_json.encode("utf-8")).hexdigest(),
+                )
+            )
         queued_units = 0
-        for index, (logical_id, message_type, marker, body_json, image) in enumerate(
-            units, start=1
-        ):
+        for index, unit in enumerate(units, start=1):
             if event.source_type == "user_message":
                 operation = "user_message"
             elif event.kind is EventKind.FINAL_ANSWER and index == len(units):
                 operation = "final"
             else:
                 operation = "commentary"
-            body_hash = (
-                image.content_hash
-                if image is not None
-                else sha256(body_json.encode("utf-8")).hexdigest()
-            )
             inserted = connection.execute(
                 "INSERT INTO provider_outbox(logical_message_id,thread_id,turn_id,item_id,operation,"
                 "message_type,endpoint_name,target_message_id,reply_in_thread,stable_uuid,marker,body_json,body_hash,"
@@ -290,23 +411,23 @@ class OutboundPipeline:
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(logical_message_id) DO NOTHING",
                 (
-                    logical_id,
+                    unit.logical_id,
                     event.thread_id,
                     event.turn_id,
                     event.item_id,
                     operation,
-                    message_type,
+                    unit.message_type,
                     endpoint,
                     binding["anchor_message_id"],
                     int(binding["conversation_mode"] == "topic_group"),
                     stable_uuid(
-                        logical_id,
+                        unit.logical_id,
                         chat_id=binding["chat_id"],
                         conversation_mode=binding["conversation_mode"],
                     ),
-                    marker,
-                    body_json,
-                    body_hash,
+                    unit.marker,
+                    unit.body_json,
+                    unit.body_hash,
                     priority,
                     "pending",
                     now,
@@ -317,19 +438,38 @@ class OutboundPipeline:
             if inserted.rowcount != 1:
                 continue
             queued_units += 1
-            if image is not None:
+            if unit.image is not None:
                 outbox_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
                 connection.execute(
                     "INSERT INTO outbound_images(outbox_id,source_path,file_name,mime_type,content,"
                     "content_hash,updated_at) VALUES(?,?,?,?,?,?,?)",
                     (
                         outbox_id,
-                        image.source_path,
-                        image.file_name,
-                        image.mime_type,
-                        image.content,
-                        image.content_hash,
+                        unit.image.source_path,
+                        unit.image.file_name,
+                        unit.image.mime_type,
+                        unit.image.content,
+                        unit.image.content_hash,
                         now,
+                    ),
+                )
+            elif unit.rich_images:
+                outbox_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
+                connection.executemany(
+                    "INSERT INTO outbound_rich_images(outbox_id,ordinal,source_path,file_name,"
+                    "mime_type,content,content_hash,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        (
+                            outbox_id,
+                            ordinal,
+                            image.source_path,
+                            image.file_name,
+                            image.mime_type,
+                            image.content,
+                            image.content_hash,
+                            now,
+                        )
+                        for ordinal, image in enumerate(unit.rich_images, start=1)
                     ),
                 )
         return queued_units
@@ -503,7 +643,17 @@ class OutboxWorker:
                         ("turn:" + str(row["turn_id"]), utc_now()),
                     )
                 return True
-        msg_type = "interactive" if row["operation"] == "approval" else row["message_type"]
+        is_rich_post = (
+            row["message_type"] == "interactive"
+            and body.get("_cfb_message_type") == "post"
+        )
+        msg_type = (
+            "interactive"
+            if row["operation"] == "approval"
+            else "post"
+            if is_rich_post
+            else row["message_type"]
+        )
         if msg_type == "image":
             image = self.storage.image_payload_for_lease(row["outbox_id"], self.instance_id)
             if not image["image_key"]:
@@ -549,8 +699,90 @@ class OutboxWorker:
                         )
                 return True
             body = {"image_key": str(image["image_key"])}
+        elif is_rich_post:
+            image = self.storage.rich_image_payload_for_lease(
+                row["outbox_id"], self.instance_id
+            )
+            if image is not None:
+                result = self.client.upload_image(
+                    file_name=image["file_name"],
+                    mime_type=image["mime_type"],
+                    content=bytes(image["content"]),
+                )
+                if result.outcome is ProviderOutcome.CONFIRMED and result.image_key:
+                    self.storage.stage_uploaded_rich_image(
+                        row["outbox_id"],
+                        self.instance_id,
+                        int(image["ordinal"]),
+                        result.image_key,
+                    )
+                elif result.outcome in {ProviderOutcome.RETRYABLE, ProviderOutcome.UNKNOWN}:
+                    delay = result.retry_after_seconds or min(
+                        300.0, 2 ** min(int(image["upload_attempt_count"]) + 1, 8)
+                    )
+                    retry_at = (datetime.now(UTC) + timedelta(seconds=delay)).isoformat().replace(
+                        "+00:00", "Z"
+                    )
+                    self.storage.finish_outbox(
+                        row["outbox_id"],
+                        self.instance_id,
+                        state="retryable",
+                        error_code="rich_image_upload:" + result.code,
+                        next_attempt_at=retry_at,
+                    )
+                else:
+                    terminal = (
+                        "final_undelivered" if row["operation"] == "final" else "permanent"
+                    )
+                    self.storage.finish_outbox(
+                        row["outbox_id"],
+                        self.instance_id,
+                        state=terminal,
+                        error_code="rich_image_upload:" + result.code,
+                    )
+                return True
+
+            image_keys = {
+                int(item["ordinal"]): str(item["image_key"])
+                for item in self.storage.connection.execute(
+                    "SELECT ordinal,image_key FROM outbound_rich_images "
+                    "WHERE outbox_id=? ORDER BY ordinal",
+                    (row["outbox_id"],),
+                ).fetchall()
+                if item["image_key"]
+            }
+            provider_body = json.loads(json.dumps(body, ensure_ascii=False))
+            provider_body.pop("_cfb_message_type", None)
+            for paragraph in provider_body.get("zh_cn", {}).get("content", []):
+                for element in paragraph:
+                    ordinal = element.pop("_cfb_image_ordinal", None)
+                    if ordinal is not None:
+                        key = image_keys.get(int(ordinal))
+                        if not key:
+                            self.storage.finish_outbox(
+                                row["outbox_id"],
+                                self.instance_id,
+                                state="permanent",
+                                error_code="rich_image_key_missing",
+                            )
+                            return True
+                        element["image_key"] = key
+            body = provider_body
         result: ProviderResult | None = None
-        outbound_body_json = row["body_json"]
+        outbound_body_json = json.dumps(
+            body, ensure_ascii=False, separators=(",", ":")
+        )
+        if is_rich_post:
+            self.storage.connection.execute(
+                "UPDATE provider_outbox SET body_hash=?,updated_at=? "
+                "WHERE outbox_id=? AND state='leased' AND lease_owner=?",
+                (
+                    sha256(outbound_body_json.encode("utf-8")).hexdigest(),
+                    utc_now(),
+                    row["outbox_id"],
+                    self.instance_id,
+                ),
+            )
         if (
             row["operation"] in {"user_message", "subscription"}
             and msg_type == "text"
