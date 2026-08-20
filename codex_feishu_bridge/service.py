@@ -993,6 +993,8 @@ class BridgeService:
             "ORDER BY i.ingest_seq LIMIT 20"
         ).fetchall()
         for row in rows:
+            if self._expire_ingress_row(row):
+                continue
             if self.ingress.suppress_if_outbound_echo(str(row["message_id"])):
                 continue
             command = parse_command(row["message_type"], row["text"])
@@ -1175,24 +1177,32 @@ class BridgeService:
             "ORDER BY i.ingest_seq LIMIT 100",
             (f"-{_INGRESS_DELIVERY_TIMEOUT_SECONDS} seconds",),
         ).fetchall()
-        expired = 0
-        for row in rows:
-            updated = self.storage.connection.execute(
-                "UPDATE ingress_messages SET routing_state='dispatch_rejected',"
-                "dispatch_not_before=NULL,last_dispatch_error='delivery_timeout' "
-                "WHERE tenant_key=? AND app_id=? AND message_id=? "
-                "AND routing_state IN ('control','routed_current','routed_reply')",
-                (row["tenant_key"], row["app_id"], row["message_id"]),
-            )
-            if updated.rowcount != 1:
-                continue
-            expired += 1
-            self._queue_control_ack(
+        return sum(int(self._expire_ingress_row(row)) for row in rows)
+
+    def _expire_ingress_row(self, row: Any) -> bool:
+        """Apply the terminal deadline again immediately before dispatch."""
+
+        updated = self.storage.connection.execute(
+            "UPDATE ingress_messages SET routing_state='dispatch_rejected',"
+            "dispatch_not_before=NULL,last_dispatch_error='delivery_timeout' "
+            "WHERE tenant_key=? AND app_id=? AND message_id=? "
+            "AND routing_state IN ('control','routed_current','routed_reply') "
+            "AND datetime(received_at)<=datetime('now',?)",
+            (
+                row["tenant_key"],
+                row["app_id"],
                 row["message_id"],
-                row["target_thread_id"],
-                "⚠ 上行消息投递 Codex 超过 1 分钟仍未成功，已丢弃并停止重试，请重新发送。",
-            )
-        return expired
+                f"-{_INGRESS_DELIVERY_TIMEOUT_SECONDS} seconds",
+            ),
+        )
+        if updated.rowcount != 1:
+            return False
+        self._queue_control_ack(
+            row["message_id"],
+            row["target_thread_id"],
+            "⚠ 上行消息投递 Codex 超过 1 分钟仍未成功，已丢弃并停止重试，请重新发送。",
+        )
+        return True
 
     def _has_blocking_active_turn(self, thread_id: str) -> bool:
         """Keep a thread queued while it has a live Desktop or bridge turn.
