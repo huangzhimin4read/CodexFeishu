@@ -7,6 +7,14 @@ from pathlib import Path
 import pytest
 
 
+def test_supervisor_default_startup_grace_covers_cold_windows_imports() -> None:
+    script = (
+        Path(__file__).parents[1] / "scripts" / "run_supervised_remote_service.ps1"
+    ).read_text(encoding="utf-8")
+
+    assert "[int]$StartupGraceSeconds = 300" in script
+
+
 @pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell is unavailable")
 def test_supervisor_terminates_a_live_worker_when_health_never_appears(tmp_path: Path) -> None:
     application = tmp_path / "app"

@@ -12,7 +12,11 @@ param(
     [ValidateRange(1, 9999)]
     [int]$MaxRestartAttempts = 999,
     [ValidateRange(1, 3600)]
-    [int]$StartupGraceSeconds = 120,
+    # Importing the full Feishu/Lark SDK and scanning Codex rollouts can exceed
+    # two minutes on Windows after a cold filesystem or antivirus cache miss.
+    # The worker has not promised a health heartbeat until startup completes,
+    # so give cold starts a separate, deliberately longer grace period.
+    [int]$StartupGraceSeconds = 300,
     [ValidateRange(1, 3600)]
     [int]$HealthStaleSeconds = 120,
     [ValidateRange(1, 60)]
