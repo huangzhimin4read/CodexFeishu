@@ -341,6 +341,47 @@ def test_codex_user_message_can_be_replied_as_authorized_feishu_user(
         assert tuple(ancestry) == ("outbound", "thread", "anchor")
 
 
+def test_unavailable_user_cli_falls_back_to_labeled_bot_text(tmp_path: Path) -> None:
+    class RecordingClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        def call(self, endpoint: str, **kwargs):
+            self.calls.append((endpoint, kwargs))
+            return ProviderResult(ProviderOutcome.CONFIRMED, "0", message_id="bot-reply")
+
+    with RuntimeStorage(tmp_path / "runtime.db") as storage:
+        storage.initialize_runtime(sink_mode="outbound")
+        _prepare(storage, conversation_mode="topic_group")
+        OutboundPipeline(
+            storage,
+            owner_display_name="项目所有者",
+            user_messages_as_user=True,
+        ).ingest_rollout_batch(
+            RolloutBatch(
+                (
+                    _event(
+                        EventKind.COMMENTARY,
+                        "codex-user-fallback",
+                        "CLI 暂不可用",
+                        source_type="user_message",
+                    ),
+                ),
+                SourceCursor("source", "file", 100, "hash", "1"),
+            )
+        )
+        client = RecordingClient()
+        assert OutboxWorker(
+            storage,
+            client,
+            "worker",
+            user_message_sender=None,
+            owner_display_name="项目所有者",
+        ).run_once()
+        sent = json.loads(client.calls[0][1]["json_body"]["content"])
+        assert sent == {"text": "👤 项目所有者：CLI 暂不可用"}
+
+
 def test_new_topic_auto_subscribes_through_verified_owner_reply(tmp_path: Path) -> None:
     class RecordingClient:
         def __init__(self) -> None:
@@ -1130,11 +1171,11 @@ def test_local_markdown_image_is_uploaded_then_replied_in_task_topic(tmp_path: P
         ]
         assert str(image) not in rows[0]["body_json"]
         rich_body = json.loads(rows[0]["body_json"])
-        assert rich_body["_cfb_message_type"] == "post"
-        assert [paragraph[0]["tag"] for paragraph in rich_body["zh_cn"]["content"]] == [
-            "text",
+        assert rich_body["_cfb_message_type"] == "interactive"
+        assert [element["tag"] for element in rich_body["elements"]] == [
+            "div",
             "img",
-            "text",
+            "div",
         ]
         assert json.loads(rows[-1]["body_json"])["text"] == "🔔【等待你的回应】"
         stored = storage.connection.execute(
@@ -1153,16 +1194,21 @@ def test_local_markdown_image_is_uploaded_then_replied_in_task_topic(tmp_path: P
         ).fetchone()
         assert image_row["state"] == "retryable"
         assert worker.run_once()  # one rich post after every image key is durable
-        assert client.calls[-1][1]["json_body"]["msg_type"] == "post"
+        assert client.calls[-1][1]["json_body"]["msg_type"] == "interactive"
         sent_post = json.loads(client.calls[-1][1]["json_body"]["content"])
         assert "_cfb_message_type" not in sent_post
-        assert sent_post["zh_cn"]["content"][1][0] == {
+        assert sent_post["elements"][1] == {
             "tag": "img",
-            "image_key": "img-fixture",
+            "img_key": "img-fixture",
+            "alt": {"tag": "plain_text", "content": "曲线"},
         }
         assert [
-            sent_post["zh_cn"]["content"][index][0]["text"] for index in (0, 2)
+            sent_post["elements"][index]["text"]["content"] for index in (0, 2)
         ] == ["前文", "后文"]
+        assert all(
+            sent_post["elements"][index]["text"]["tag"] == "lark_md"
+            for index in (0, 2)
+        )
         assert client.calls[-1][1]["json_body"]["reply_in_thread"] is True
         assert worker.run_once()  # waiting-for-reply cue
         assert json.loads(client.calls[-1][1]["json_body"]["content"])["text"] == (
@@ -1268,7 +1314,7 @@ def test_final_markdown_image_is_resent_after_matching_commentary_image(tmp_path
             ("commentary", "interactive"),
             ("final", "text"),
         ]
-        assert json.loads(rows[1]["body_json"])["_cfb_message_type"] == "post"
+        assert json.loads(rows[1]["body_json"])["_cfb_message_type"] == "interactive"
         assert json.loads(rows[-1]["body_json"])["text"] == "🔔【等待你的回应】"
         stored = storage.connection.execute(
             "SELECT source_path,file_name,mime_type,content,content_hash FROM outbound_images"
@@ -1299,7 +1345,7 @@ def test_unknown_image_upload_is_retried_without_sending_a_visible_message(
 
         def call(self, endpoint: str, **kwargs):
             self.calls += 1
-            assert kwargs["json_body"]["msg_type"] == "text"
+            assert kwargs["json_body"]["msg_type"] == "interactive"
             return ProviderResult(
                 ProviderOutcome.CONFIRMED,
                 "0",

@@ -3,8 +3,10 @@ import json
 import unicodedata
 
 from codex_feishu_bridge.feishu.formatter import (
+    format_markdown_card_chunks,
     format_text_chunks,
     invisible_marker,
+    provider_visible_markdown,
     provider_visible_text,
     redact_text,
 )
@@ -42,6 +44,37 @@ def test_markdown_link_keeps_label_and_hides_destination() -> None:
     visible = provider_visible_text(source)
     assert visible == "请查看 🔗【当前制造交接文件】。"
     assert "D:/" not in visible and "handoff.md" not in visible
+
+
+def test_provider_markdown_keeps_formatting_and_clickable_web_labels() -> None:
+    source = "## 标题\n\n- **重点**\n- [官网](https://example.test/docs)"
+    visible = provider_visible_markdown(source)
+    assert visible == "## 标题\n\n- **重点**\n- [🔗 官网](https://example.test/docs)"
+
+
+def test_provider_markdown_hides_local_link_destinations() -> None:
+    source = "[交接文件](D:/Projects/private/handoff.md:36)"
+    visible = provider_visible_markdown(source)
+    assert visible == "🔗【交接文件】"
+    assert "D:/" not in visible
+
+
+def test_markdown_chunks_use_native_lark_markdown_cards() -> None:
+    chunks = format_markdown_card_chunks(
+        "**粗体**\n\n```text\ncode\n```", marker_seed="fixture"
+    )
+    assert len(chunks) == 1
+    body = json.loads(chunks[0].body_json)
+    assert body["_cfb_message_type"] == "interactive"
+    assert body["elements"] == [
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": "**粗体**\n\n```text\ncode\n```",
+            },
+        }
+    ]
 
 
 def test_markdown_link_parser_handles_escaped_labels_and_nested_targets() -> None:

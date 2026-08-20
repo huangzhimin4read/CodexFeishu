@@ -6,6 +6,7 @@ import json
 import re
 from dataclasses import dataclass
 from hashlib import sha256
+from urllib.parse import urlparse
 
 
 _SECRET_PATTERNS = (
@@ -93,7 +94,7 @@ def _markdown_target_end(text: str, start: int) -> tuple[int | None, int]:
     return None, length
 
 
-def _replace_markdown_links(text: str) -> str:
+def _replace_markdown_links(text: str, *, keep_http_targets: bool = False) -> str:
     """Hide Markdown destinations in one bounded, left-to-right scan."""
 
     replacements: list[tuple[int, int, str]] = []
@@ -131,7 +132,19 @@ def _replace_markdown_links(text: str) -> str:
             continue
         raw_label = text[label_start:cursor]
         label = re.sub(r"\\([\\\[\]])", r"\1", raw_label).strip()
-        replacements.append((candidate[0], target_end, f"🔗【{label or '链接'}】"))
+        raw_target = text[cursor + 2 : target_end - 1].strip()
+        target = (
+            raw_target[1:-1]
+            if raw_target.startswith("<") and raw_target.endswith(">")
+            else raw_target
+        )
+        scheme = urlparse(target).scheme.lower()
+        if keep_http_targets and scheme in {"http", "https"}:
+            replacement = f"[🔗 {label or '链接'}]({target})"
+        else:
+            # Local paths and non-web schemes must never reach Feishu.
+            replacement = f"🔗【{label or '链接'}】"
+        replacements.append((candidate[0], target_end, replacement))
         cursor = target_end
 
     if not replacements:
@@ -160,6 +173,22 @@ def provider_visible_text(text: str) -> str:
     value = _CODEX_FILE_CITATION.sub(replace_file_citation, value)
 
     value = _replace_markdown_links(value)
+    value = re.sub(r"[ \t]+\n", "\n", value)
+    value = re.sub(r"\n{3,}", "\n\n", value)
+    return value.strip()
+
+
+def provider_visible_markdown(text: str) -> str:
+    """Keep supported Markdown while removing local and machine-only metadata."""
+
+    value = _OAI_MEMORY_CITATION.sub("", text)
+
+    def replace_file_citation(match: re.Match[str]) -> str:
+        name = match.group("path").replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].strip()
+        return f"🔗 **{name or '文件'}**"
+
+    value = _CODEX_FILE_CITATION.sub(replace_file_citation, value)
+    value = _replace_markdown_links(value, keep_http_targets=True)
     value = re.sub(r"[ \t]+\n", "\n", value)
     value = re.sub(r"\n{3,}", "\n\n", value)
     return value.strip()
@@ -214,5 +243,46 @@ def format_text_chunks(text: str, *, marker_seed: str, byte_budget: int = 18_000
             raise ValueError("serialized message exceeds endpoint contract budget")
         result.append(
             FormattedChunk(index, total, marker, body, sha256(body.encode("utf-8")).hexdigest())
+        )
+    return tuple(result)
+
+
+def format_markdown_card_chunks(
+    text: str, *, marker_seed: str, byte_budget: int = 18_000
+) -> tuple[FormattedChunk, ...]:
+    """Format provider-safe Markdown as native Feishu/Lark card elements."""
+
+    safe = provider_visible_markdown(redact_text(text))
+    if not safe:
+        return ()
+    pieces = _utf8_chunks(safe, max(64, byte_budget - 768))
+    result: list[FormattedChunk] = []
+    total = len(pieces)
+    for index, piece in enumerate(pieces, start=1):
+        marker = invisible_marker(
+            "cfb:" + sha256(f"{marker_seed}:md:{index}".encode()).hexdigest()[:24]
+        )
+        ordinal = f"({index}/{total})\n" if total > 1 else ""
+        body = {
+            "_cfb_message_type": "interactive",
+            "config": {"wide_screen_mode": True},
+            "elements": [
+                {
+                    "tag": "div",
+                    "text": {"tag": "lark_md", "content": f"{ordinal}{piece}"},
+                }
+            ],
+        }
+        body_json = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
+        if len(body_json.encode("utf-8")) > byte_budget:
+            raise ValueError("serialized Markdown card exceeds endpoint contract budget")
+        result.append(
+            FormattedChunk(
+                index,
+                total,
+                marker,
+                body_json,
+                sha256(body_json.encode("utf-8")).hexdigest(),
+            )
         )
     return tuple(result)

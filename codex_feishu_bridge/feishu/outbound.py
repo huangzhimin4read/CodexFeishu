@@ -16,9 +16,10 @@ from ..models import EventKind, NormalizedEvent, RolloutBatch
 from ..runtime_storage import RuntimeStorage, utc_now
 from .client import FeishuClient, ProviderOutcome, ProviderResult
 from .formatter import (
+    format_markdown_card_chunks,
     format_text_chunks,
     invisible_marker,
-    provider_visible_text,
+    provider_visible_markdown,
     redact_text,
 )
 from .images import LocalImage, extract_local_images
@@ -98,26 +99,27 @@ class _OutboundUnit:
     rich_images: tuple[LocalImage, ...] = ()
 
 
-def _rich_post_body(
+def _markdown_card_body(
     parts: tuple[str | LocalImage, ...],
     active_images: tuple[LocalImage, ...],
 ) -> tuple[str, tuple[LocalImage, ...]] | None:
-    """Build one ordered Feishu post when local images sit inside visible text."""
+    """Build one ordered Markdown card when local images sit inside visible text."""
 
     active_hashes = {image.content_hash for image in active_images}
     used_hashes: set[str] = set()
     post_images: list[LocalImage] = []
-    content: list[list[dict[str, object]]] = []
+    elements: list[dict[str, object]] = []
     has_visible_text = False
 
     def append_text(value: str) -> None:
         nonlocal has_visible_text
-        safe = provider_visible_text(redact_text(value))
+        safe = provider_visible_markdown(redact_text(value))
         if not safe:
             return
         has_visible_text = True
-        for line in safe.splitlines():
-            content.append([{"tag": "text", "text": line or " "}])
+        elements.append(
+            {"tag": "div", "text": {"tag": "lark_md", "content": safe}}
+        )
 
     for part in parts:
         if isinstance(part, str):
@@ -128,21 +130,24 @@ def _rich_post_body(
             continue
         used_hashes.add(part.content_hash)
         post_images.append(part)
-        content.append(
-            [
-                {
-                    "tag": "img",
-                    "image_key": None,
-                    "_cfb_image_ordinal": len(post_images),
-                }
-            ]
+        elements.append(
+            {
+                "tag": "img",
+                "img_key": None,
+                "alt": {
+                    "tag": "plain_text",
+                    "content": part.label or part.file_name,
+                },
+                "_cfb_image_ordinal": len(post_images),
+            }
         )
 
     if not has_visible_text or not post_images:
         return None
     body = {
-        "_cfb_message_type": "post",
-        "zh_cn": {"title": "", "content": content},
+        "_cfb_message_type": "interactive",
+        "config": {"wide_screen_mode": True},
+        "elements": elements,
     }
     body_json = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
     if len(body_json.encode("utf-8")) > 18_000:
@@ -313,7 +318,7 @@ class OutboundPipeline:
         endpoint = "reply_message"
         units: list[_OutboundUnit] = []
         rich_post = (
-            _rich_post_body(extracted.parts, tuple(images))
+            _markdown_card_body(extracted.parts, tuple(images))
             if event.source_type != "user_message"
             else None
         )
@@ -342,7 +347,13 @@ class OutboundPipeline:
             )
         else:
             chunks = (
-                format_text_chunks(extracted.text, marker_seed=event.logical_key)
+                (
+                    format_text_chunks(extracted.text, marker_seed=event.logical_key)
+                    if event.source_type == "user_message"
+                    else format_markdown_card_chunks(
+                        extracted.text, marker_seed=event.logical_key
+                    )
+                )
                 if extracted.text.strip()
                 else ()
             )
@@ -351,7 +362,7 @@ class OutboundPipeline:
                 units.append(
                     _OutboundUnit(
                         logical_id,
-                        "text",
+                        "text" if event.source_type == "user_message" else "interactive",
                         chunk.marker,
                         chunk.body_json,
                         chunk.body_hash,
@@ -643,15 +654,16 @@ class OutboxWorker:
                         ("turn:" + str(row["turn_id"]), utc_now()),
                     )
                 return True
-        is_rich_post = (
+        internal_message_type = body.get("_cfb_message_type")
+        is_rich_content = (
             row["message_type"] == "interactive"
-            and body.get("_cfb_message_type") == "post"
+            and internal_message_type in {"interactive", "post"}
         )
         msg_type = (
             "interactive"
             if row["operation"] == "approval"
-            else "post"
-            if is_rich_post
+            else str(internal_message_type)
+            if is_rich_content
             else row["message_type"]
         )
         if msg_type == "image":
@@ -699,7 +711,7 @@ class OutboxWorker:
                         )
                 return True
             body = {"image_key": str(image["image_key"])}
-        elif is_rich_post:
+        elif is_rich_content:
             image = self.storage.rich_image_payload_for_lease(
                 row["outbox_id"], self.instance_id
             )
@@ -753,8 +765,16 @@ class OutboxWorker:
             }
             provider_body = json.loads(json.dumps(body, ensure_ascii=False))
             provider_body.pop("_cfb_message_type", None)
-            for paragraph in provider_body.get("zh_cn", {}).get("content", []):
-                for element in paragraph:
+            if internal_message_type == "post":
+                rich_elements = [
+                    element
+                    for paragraph in provider_body.get("zh_cn", {}).get("content", [])
+                    for element in paragraph
+                ]
+            else:
+                rich_elements = provider_body.get("elements", [])
+            for element in rich_elements:
+                if isinstance(element, dict):
                     ordinal = element.pop("_cfb_image_ordinal", None)
                     if ordinal is not None:
                         key = image_keys.get(int(ordinal))
@@ -766,13 +786,16 @@ class OutboxWorker:
                                 error_code="rich_image_key_missing",
                             )
                             return True
-                        element["image_key"] = key
+                        if internal_message_type == "post":
+                            element["image_key"] = key
+                        else:
+                            element["img_key"] = key
             body = provider_body
         result: ProviderResult | None = None
         outbound_body_json = json.dumps(
             body, ensure_ascii=False, separators=(",", ":")
         )
-        if is_rich_post:
+        if is_rich_content:
             self.storage.connection.execute(
                 "UPDATE provider_outbox SET body_hash=?,updated_at=? "
                 "WHERE outbox_id=? AND state='leased' AND lease_owner=?",
@@ -782,6 +805,17 @@ class OutboxWorker:
                     row["outbox_id"],
                     self.instance_id,
                 ),
+            )
+        if (
+            row["operation"] == "user_message"
+            and msg_type == "text"
+            and self.user_message_sender is None
+            and isinstance(body.get("text"), str)
+        ):
+            outbound_body_json = json.dumps(
+                {"text": f"👤 {self.owner_display_name}：{body['text']}"},
+                ensure_ascii=False,
+                separators=(",", ":"),
             )
         if (
             row["operation"] in {"user_message", "subscription"}

@@ -302,7 +302,17 @@ class BridgeService:
                 )
                 user_message_sender.verify_ready()
             except LarkCliUnavailable as exc:
-                raise ServiceError(str(exc)) from exc
+                # User-identity mirroring is optional. A stale or temporarily
+                # unavailable CLI authorization must not stop bot delivery.
+                user_message_sender = None
+                self.logger.warning(
+                    "lark_cli_user_identity_unavailable",
+                    extra={"fields": {"error": type(exc).__name__}},
+                )
+                self.storage.upsert_runtime_metadata(
+                    "user_cli_startup_fallback",
+                    {"at": utc_now(), "code": type(exc).__name__},
+                )
         suppressed_notifications = suppress_queued_internal_user_notifications(self.storage)
         if suppressed_notifications:
             self.logger.info(

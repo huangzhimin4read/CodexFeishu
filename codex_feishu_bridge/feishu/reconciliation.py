@@ -105,15 +105,16 @@ class SendReconciler:
                     persisted_body = json.loads(row["body_json"])
                 except (TypeError, json.JSONDecodeError):
                     persisted_body = None
-                is_rich_post = (
-                    isinstance(persisted_body, dict)
-                    and persisted_body.get("_cfb_message_type") == "post"
+                internal_message_type = (
+                    persisted_body.get("_cfb_message_type")
+                    if isinstance(persisted_body, dict)
+                    else None
                 )
                 expected_type = (
                     "interactive"
                     if row["operation"] == "approval"
-                    else "post"
-                    if is_rich_post
+                    else str(internal_message_type)
+                    if internal_message_type in {"interactive", "post"}
                     else row["message_type"]
                 )
                 if item.get("msg_type") != expected_type:
