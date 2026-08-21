@@ -150,6 +150,9 @@ def test_dispatch_persists_fence_before_send_and_tombstone_after_accept(tmp_path
         )
         assert result.state == "accepted" and result.turn_id is None
         assert result.queued_submission_id == "queued-1"
+        assert not any(
+            method == "thread/resume" for method, _ in controller.connection.calls
+        )
         assert storage.connection.execute(
             "SELECT queued_submission_id FROM dispatch_records "
             "WHERE ingress_message_id='message-1'"
@@ -264,6 +267,7 @@ def test_dispatch_queues_into_active_thread_without_steering(tmp_path: Path) -> 
         )
         assert queued["input"] == [{"type": "text", "text": "remote update"}]
         assert not any(method == "turn/steer" for method, _ in connection.calls)
+        assert not any(method == "thread/resume" for method, _ in connection.calls)
         record = storage.connection.execute(
             "SELECT state,turn_id,queued_submission_id FROM dispatch_records "
             "WHERE ingress_message_id='message-steer'"

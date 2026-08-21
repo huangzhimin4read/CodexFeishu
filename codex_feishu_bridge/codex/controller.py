@@ -165,27 +165,10 @@ class CodexController:
         binding_epoch, identity_epoch, fencing_token = self._require_dispatchable(
             thread_id, required_capability=required_capability
         )
-        sandbox = {
-            "readOnly": "read-only",
-            "workspaceWrite": "workspace-write",
-            "dangerFullAccess": "danger-full-access",
-        }[profile.sandbox_type.value]
-        thread_result = self.connection.request(
-            "thread/resume",
-            {
-                "threadId": thread_id,
-                "cwd": str(profile.cwd),
-                "approvalPolicy": profile.approval_policy.value,
-                "approvalsReviewer": profile.approvals_reviewer,
-                "sandbox": sandbox,
-            },
-        )
-        thread = thread_result.get("thread")
-        if not isinstance(thread, dict):
-            raise DispatchError("thread/read result is malformed")
-        if thread.get("canAcceptDirectInput") is not True:
-            raise DispatchError("pinned experimental thread schema does not permit direct input")
-        requirements = self._managed_requirements(profile)
+        # ``thread/queue/add`` persists against a stored task and deliberately
+        # does not require the target to be resumed by this App Server. Taking
+        # a writer first would defeat the queue API for Desktop-owned tasks.
+        self._managed_requirements(profile)
         attempt_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"codex-feishu:{ingress_message_id}"))
         client_message_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"codex-feishu:{ingress_message_id}"))
         method = "thread/queue/add"
