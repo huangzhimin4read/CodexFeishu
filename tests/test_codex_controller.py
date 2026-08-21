@@ -2,7 +2,7 @@ import json
 from hashlib import sha256
 from pathlib import Path
 
-from codex_feishu_bridge.codex.controller import CodexController, DispatchBusy
+from codex_feishu_bridge.codex.controller import CodexController
 from codex_feishu_bridge.codex.execution_profile import ExecutionProfile, SandboxType
 from codex_feishu_bridge.controls import ProfileController
 from codex_feishu_bridge.models import OwnershipState
@@ -17,13 +17,16 @@ class FakeConnection:
     def __init__(
         self,
         *,
-        fail_turn: bool = False,
+        fail_queue: bool = False,
+        queue_after_failure: bool = False,
         thread_status: str = "idle",
         active_turns: tuple[str, ...] = ("turn-active",),
     ) -> None:
-        self.fail_turn = fail_turn
+        self.fail_queue = fail_queue
+        self.queue_after_failure = queue_after_failure
         self.thread_status = thread_status
         self.active_turns = active_turns
+        self.last_client_id = ""
         self.calls = []
 
     def request(self, method, params, **kwargs):
@@ -32,7 +35,7 @@ class FakeConnection:
             return {
                 "thread": {
                     "status": {"type": self.thread_status},
-                    "canAcceptDirectInput": self.thread_status == "idle",
+                    "canAcceptDirectInput": True,
                     "turns": [
                         {"id": turn_id, "items": [], "status": "inProgress"}
                         for turn_id in self.active_turns
@@ -43,12 +46,32 @@ class FakeConnection:
             }
         if method == "configRequirements/read":
             return {"requirements": None}
-        if method == "turn/start":
+        if method == "thread/queue/add":
+            self.last_client_id = params["clientUserMessageId"]
             if "before_send" in kwargs:
                 kwargs["before_send"]({"id": 9, "method": method, "params": params})
-            if self.fail_turn:
+            if self.fail_queue:
                 raise OSError("fixture transport uncertainty")
-            return {"turn": {"id": "turn-1", "items": [], "status": "inProgress"}}
+            return {
+                "queuedSubmission": {
+                    "id": "queued-1",
+                    "input": params["input"],
+                    "clientUserMessageId": params["clientUserMessageId"],
+                }
+            }
+        if method == "thread/queue/list":
+            return {
+                "data": [
+                    {
+                        "id": "queued-after-timeout",
+                        "input": [{"type": "text", "text": "work"}],
+                        "clientUserMessageId": self.last_client_id,
+                    }
+                ]
+                if self.queue_after_failure
+                else [],
+                "nextCursor": None,
+            }
         if method == "turn/steer":
             if "before_send" in kwargs:
                 kwargs["before_send"]({"id": 10, "method": method, "params": params})
@@ -114,7 +137,7 @@ def test_dispatch_persists_fence_before_send_and_tombstone_after_accept(tmp_path
         controller = CodexController(
             storage,
             FakeConnection(),
-            schema_root=ROOT / "generated/codex/0.145.0/experimental",
+            schema_root=ROOT / "generated/codex/0.148.0/experimental",
             server_epoch="server",
             connection_epoch="connection",
         )
@@ -125,7 +148,12 @@ def test_dispatch_persists_fence_before_send_and_tombstone_after_accept(tmp_path
             profile=profile,
             profile_hash=profile_hash,
         )
-        assert result.state == "accepted" and result.turn_id == "turn-1"
+        assert result.state == "accepted" and result.turn_id is None
+        assert result.queued_submission_id == "queued-1"
+        assert storage.connection.execute(
+            "SELECT queued_submission_id FROM dispatch_records "
+            "WHERE ingress_message_id='message-1'"
+        ).fetchone()[0] == "queued-1"
         assert storage.connection.execute(
             "SELECT COUNT(*) FROM executed_command_tombstones WHERE tombstone_key='message-1'"
         ).fetchone()[0] == 1
@@ -140,11 +168,11 @@ def test_dispatch_write_failure_becomes_unknown_and_is_not_retried(tmp_path: Pat
             (tmp_path,),
             ExecutionProfile(SandboxType.READ_ONLY, tmp_path, network_access=False),
         ).load("thread")
-        connection = FakeConnection(fail_turn=True)
+        connection = FakeConnection(fail_queue=True)
         controller = CodexController(
             storage,
             connection,
-            schema_root=ROOT / "generated/codex/0.145.0/experimental",
+            schema_root=ROOT / "generated/codex/0.148.0/experimental",
             server_epoch="server",
             connection_epoch="connection",
         )
@@ -163,10 +191,46 @@ def test_dispatch_write_failure_becomes_unknown_and_is_not_retried(tmp_path: Pat
             profile_hash=profile_hash,
         )
         assert first.state == second.state == "outcome_unknown"
-        assert [method for method, _ in connection.calls].count("turn/start") == 1
+        assert [method for method, _ in connection.calls].count("thread/queue/add") == 1
 
 
-def test_dispatch_steers_directly_into_exact_active_turn(tmp_path: Path) -> None:
+def test_dispatch_timeout_is_reconciled_from_durable_queue(tmp_path: Path) -> None:
+    with RuntimeStorage(tmp_path / "db.sqlite") as storage:
+        storage.initialize_runtime(sink_mode="control")
+        profile_hash = prepare(storage, tmp_path)
+        profile = ProfileController(
+            storage,
+            (tmp_path,),
+            ExecutionProfile(SandboxType.READ_ONLY, tmp_path, network_access=False),
+        ).load("thread")
+        connection = FakeConnection(fail_queue=True, queue_after_failure=True)
+        controller = CodexController(
+            storage,
+            connection,
+            schema_root=ROOT / "generated/codex/0.148.0/experimental",
+            server_epoch="server",
+            connection_epoch="connection",
+        )
+        result = controller.dispatch(
+            ingress_message_id="message-timeout",
+            thread_id="thread",
+            text="work",
+            profile=profile,
+            profile_hash=profile_hash,
+        )
+
+        assert result.state == "accepted"
+        assert result.queued_submission_id == "queued-after-timeout"
+        row = storage.connection.execute(
+            "SELECT state,queued_submission_id FROM dispatch_records"
+        ).fetchone()
+        assert tuple(row) == ("accepted", "queued-after-timeout")
+        assert storage.connection.execute(
+            "SELECT COUNT(*) FROM executed_command_tombstones"
+        ).fetchone()[0] == 1
+
+
+def test_dispatch_queues_into_active_thread_without_steering(tmp_path: Path) -> None:
     with RuntimeStorage(tmp_path / "db.sqlite") as storage:
         storage.initialize_runtime(sink_mode="control")
         profile_hash = prepare(storage, tmp_path)
@@ -179,7 +243,7 @@ def test_dispatch_steers_directly_into_exact_active_turn(tmp_path: Path) -> None
         controller = CodexController(
             storage,
             connection,
-            schema_root=ROOT / "generated/codex/0.145.0/experimental",
+            schema_root=ROOT / "generated/codex/0.148.0/experimental",
             server_epoch="server",
             connection_epoch="connection",
         )
@@ -194,21 +258,24 @@ def test_dispatch_steers_directly_into_exact_active_turn(tmp_path: Path) -> None
             active_turn_id="stale-rollout-turn",
         )
 
-        assert result.state == "accepted" and result.turn_id == "turn-active"
-        steer = next(params for method, params in connection.calls if method == "turn/steer")
-        assert steer["expectedTurnId"] == "turn-active"
-        assert steer["input"] == [{"type": "text", "text": "remote update"}]
+        assert result.state == "accepted" and result.turn_id is None
+        queued = next(
+            params for method, params in connection.calls if method == "thread/queue/add"
+        )
+        assert queued["input"] == [{"type": "text", "text": "remote update"}]
+        assert not any(method == "turn/steer" for method, _ in connection.calls)
         record = storage.connection.execute(
-            "SELECT state,turn_id FROM dispatch_records WHERE ingress_message_id='message-steer'"
+            "SELECT state,turn_id,queued_submission_id FROM dispatch_records "
+            "WHERE ingress_message_id='message-steer'"
         ).fetchone()
-        assert tuple(record) == ("accepted", "turn-active")
+        assert tuple(record) == ("accepted", None, "queued-1")
         assert storage.connection.execute(
             "SELECT COUNT(*) FROM executed_command_tombstones "
             "WHERE tombstone_key='message-steer'"
         ).fetchone()[0] == 1
 
 
-def test_dispatch_fails_closed_when_app_server_active_turn_is_ambiguous(
+def test_dispatch_queue_does_not_depend_on_active_turn_count(
     tmp_path: Path,
 ) -> None:
     with RuntimeStorage(tmp_path / "db.sqlite") as storage:
@@ -225,23 +292,20 @@ def test_dispatch_fails_closed_when_app_server_active_turn_is_ambiguous(
         controller = CodexController(
             storage,
             connection,
-            schema_root=ROOT / "generated/codex/0.145.0/experimental",
+            schema_root=ROOT / "generated/codex/0.148.0/experimental",
             server_epoch="server",
             connection_epoch="connection",
         )
 
-        try:
-            controller.dispatch(
-                ingress_message_id="message-ambiguous",
-                thread_id="thread",
-                text="remote update",
-                profile=profile,
-                profile_hash=profile_hash,
-            )
-        except DispatchBusy as exc:
-            assert "exactly one active turn" in str(exc)
-        else:
-            raise AssertionError("ambiguous App Server active turns were accepted")
+        result = controller.dispatch(
+            ingress_message_id="message-ambiguous",
+            thread_id="thread",
+            text="remote update",
+            profile=profile,
+            profile_hash=profile_hash,
+        )
+        assert result.state == "accepted"
+        assert result.queued_submission_id == "queued-1"
 
 
 def test_profile_reconciliation_ignores_thread_default_sandbox_and_closes_breaker(
@@ -263,7 +327,7 @@ def test_profile_reconciliation_ignores_thread_default_sandbox_and_closes_breake
         controller = CodexController(
             storage,
             ProfileConnection(tmp_path),
-            schema_root=ROOT / "generated/codex/0.145.0/experimental",
+            schema_root=ROOT / "generated/codex/0.148.0/experimental",
             server_epoch="server",
             connection_epoch="connection",
         )
@@ -289,7 +353,7 @@ def test_profile_reconciliation_still_fails_closed_on_resume_field_mismatch(
         controller = CodexController(
             storage,
             ProfileConnection(tmp_path, mismatch=True),
-            schema_root=ROOT / "generated/codex/0.145.0/experimental",
+            schema_root=ROOT / "generated/codex/0.148.0/experimental",
             server_epoch="server",
             connection_epoch="connection",
         )
@@ -330,7 +394,7 @@ def test_explicit_remote_grant_allows_desktop_thread_image_input(tmp_path: Path)
         controller = CodexController(
             storage,
             connection,
-            schema_root=ROOT / "generated/codex/0.145.0/experimental",
+            schema_root=ROOT / "generated/codex/0.148.0/experimental",
             server_epoch="server",
             connection_epoch="connection",
         )
@@ -348,8 +412,10 @@ def test_explicit_remote_grant_allows_desktop_thread_image_input(tmp_path: Path)
             profile=profile,
             profile_hash=profile_hash,
         )
-        turn_call = next(params for method, params in connection.calls if method == "turn/start")
-        assert turn_call["input"][1] == {"type": "localImage", "path": str(image_path)}
+        queue_call = next(
+            params for method, params in connection.calls if method == "thread/queue/add"
+        )
+        assert queue_call["input"][1] == {"type": "localImage", "path": str(image_path)}
 
         storage.connection.execute(
             "UPDATE remote_task_grants SET service_fencing_token=0 WHERE thread_id='thread'"

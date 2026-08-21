@@ -348,7 +348,9 @@ class BridgeService:
             experimental_schema_root=schema_root / "experimental",
             experimental_api=True,
             compatibility_matrix=matrix,
-            approved_experimental_client_methods=frozenset(),
+            approved_experimental_client_methods=frozenset(
+                {"thread/queue/add", "thread/queue/list"}
+            ),
             approved_experimental_server_methods=frozenset(),
             approved_experimental_server_fields=frozenset(
                 {
@@ -1120,7 +1122,7 @@ class BridgeService:
                         profile_hash=profile_hash,
                         active_turn_id=active_turn_id,
                     )
-                if result.state == "accepted" and result.turn_id is not None:
+                if result.state == "accepted":
                     self.storage.connection.execute(
                         "UPDATE ingress_messages SET last_dispatch_error=NULL "
                         "WHERE tenant_key=? AND app_id=? AND message_id=?",
@@ -1129,12 +1131,13 @@ class BridgeService:
                     self._queue_dispatch_ack(
                         row["message_id"], row["target_thread_id"]
                     )
-                    existing = self._active_rollout_turns.get(
-                        row["target_thread_id"], frozenset()
-                    )
-                    self._active_rollout_turns[row["target_thread_id"]] = (
-                        existing | frozenset({result.turn_id})
-                    )
+                    if result.turn_id is not None:
+                        existing = self._active_rollout_turns.get(
+                            row["target_thread_id"], frozenset()
+                        )
+                        self._active_rollout_turns[row["target_thread_id"]] = (
+                            existing | frozenset({result.turn_id})
+                        )
                 elif result.state == "submitted_unconfirmed":
                     self._queue_submitted_unconfirmed_ack(
                         row["message_id"], row["target_thread_id"]

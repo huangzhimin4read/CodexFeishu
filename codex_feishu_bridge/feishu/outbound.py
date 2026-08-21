@@ -246,6 +246,44 @@ class OutboundPipeline:
         if event.source_type == "user_message":
             if _is_internal_user_envelope(event.text):
                 return 0
+            if event.client_user_message_id:
+                returning = connection.execute(
+                    "SELECT dispatch_attempt_id,ingress_message_id,request_hash "
+                    "FROM dispatch_records WHERE thread_id=? AND client_user_message_id=? "
+                    "AND state IN ('bytes_sending','accepted','outcome_unknown') LIMIT 1",
+                    (event.thread_id, event.client_user_message_id),
+                ).fetchone()
+                if returning is not None:
+                    connection.execute(
+                        "UPDATE dispatch_records SET state='accepted',turn_id=?,user_item_id=?,updated_at=? "
+                        "WHERE dispatch_attempt_id=? AND state IN ('bytes_sending','accepted','outcome_unknown')",
+                        (
+                            event.turn_id,
+                            event.item_id,
+                            utc_now(),
+                            returning["dispatch_attempt_id"],
+                        ),
+                    )
+                    response_hash = sha256(
+                        f"{event.thread_id}\x1f{event.turn_id}\x1f{event.item_id}".encode("utf-8")
+                    ).hexdigest()
+                    connection.execute(
+                        "UPDATE dispatch_attempts SET state='accepted',response_hash=?,updated_at=? "
+                        "WHERE dispatch_attempt_id=? AND state IN ('dispatching','outcome_unknown','accepted')",
+                        (response_hash, utc_now(), returning["dispatch_attempt_id"]),
+                    )
+                    connection.execute(
+                        "INSERT OR IGNORE INTO executed_command_tombstones("
+                        "tombstone_key,content_hash,target_thread_id,dispatch_attempt_id,retain_until) "
+                        "VALUES(?,?,?,?,datetime('now','+365 days'))",
+                        (
+                            returning["ingress_message_id"],
+                            returning["request_hash"],
+                            event.thread_id,
+                            returning["dispatch_attempt_id"],
+                        ),
+                    )
+                    return 0
             returning = connection.execute(
                 "SELECT 1 FROM dispatch_records WHERE thread_id=? AND turn_id=? "
                 "AND user_item_id=? AND state IN ('accepted','completed') LIMIT 1",

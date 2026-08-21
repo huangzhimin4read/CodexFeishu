@@ -12,6 +12,10 @@ class DiscoveryError(RuntimeError):
     """A persisted source cannot be identified without guessing."""
 
 
+class IncompleteRollout(DiscoveryError):
+    """A newly created rollout has not written its identifying prefix yet."""
+
+
 @dataclass(frozen=True, slots=True)
 class RolloutSource:
     path: Path
@@ -26,23 +30,35 @@ class RolloutSource:
 
 
 def _session_metadata(path: Path) -> dict[str, object]:
+    reached_eof = False
     with path.open("rb") as handle:
         for line_number in range(1, 65):
             raw = handle.readline()
             if not raw:
+                reached_eof = True
                 break
             if not raw.strip():
                 continue
             try:
                 record = json.loads(raw.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                # Codex creates the rollout before its first JSONL record is
+                # necessarily complete. A non-terminated final line is a
+                # transient writer race; a terminated malformed line remains
+                # a hard corruption error.
+                if not raw.endswith((b"\n", b"\r")):
+                    raise IncompleteRollout(
+                        f"incomplete JSONL prefix in {path} at line {line_number}"
+                    ) from exc
                 raise DiscoveryError(f"invalid JSONL prefix in {path} at line {line_number}") from exc
             if record.get("type") == "session_meta":
                 payload = record.get("payload")
                 if not isinstance(payload, dict):
                     raise DiscoveryError(f"invalid session metadata in {path}")
                 return payload
-    raise DiscoveryError(f"session metadata not found in {path}")
+    if reached_eof:
+        raise IncompleteRollout(f"session metadata not yet present in {path}")
+    raise DiscoveryError(f"session metadata not found in first 64 records of {path}")
 
 
 def discover_rollouts(
@@ -74,11 +90,12 @@ def discover_rollouts(
                 continue
             version = str(metadata.get("rollout_version", metadata.get("version", "1")))
             stat = path.stat()
-        except FileNotFoundError:
+        except (FileNotFoundError, IncompleteRollout):
             # Codex may archive, move, or recreate a rollout while discovery is
-            # enumerating the sessions tree.  The next service loop will read
-            # the authoritative path; one vanished candidate must not stop the
-            # entire bridge. Other I/O and metadata errors remain visible.
+            # enumerating the sessions tree, or a new writer may not have
+            # completed its first identifying record yet. The next service
+            # loop will retry the authoritative path. Other I/O and metadata
+            # errors remain visible.
             continue
         found.append(
             RolloutSource(

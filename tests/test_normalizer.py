@@ -64,6 +64,25 @@ def test_user_message_is_normalized_for_feishu_mirroring() -> None:
     assert event.item_id == "user-item"
 
 
+def test_queued_user_message_preserves_client_identity_for_exact_echo_suppression() -> None:
+    event = RolloutNormalizer().normalize(
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "thread_id": "thread",
+                "turn_id": "turn",
+                "id": "user-item",
+                "client_id": "client-message",
+                "content": [{"type": "input_text", "text": "来自飞书"}],
+            },
+        }
+    )
+    assert event is not None
+    assert event.client_user_message_id == "client-message"
+
+
 def test_cli_resume_replay_user_message_without_item_identity_is_ignored() -> None:
     assert RolloutNormalizer().normalize(
         {

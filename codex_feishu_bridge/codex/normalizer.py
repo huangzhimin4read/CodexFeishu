@@ -281,6 +281,11 @@ class RolloutNormalizer:
         revision = payload.get("revision", record.get("revision", 0))
         if not isinstance(revision, int) or revision < 0:
             raise RolloutRecordError("revision must be a non-negative integer")
+        client_user_message_id = payload.get("client_id", payload.get("clientUserMessageId"))
+        if client_user_message_id is not None and (
+            not isinstance(client_user_message_id, str) or not client_user_message_id
+        ):
+            raise RolloutRecordError("visible user event has an invalid client message id")
         return NormalizedEvent(
             thread_id=thread_id,
             turn_id=turn_id,
@@ -290,4 +295,5 @@ class RolloutNormalizer:
             text=text,
             source_type=source_type,
             images=images,
+            client_user_message_id=client_user_message_id,
         )

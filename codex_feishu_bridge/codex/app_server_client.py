@@ -53,6 +53,8 @@ class SchemaSet:
             "turn/start": "v2/TurnStartResponse.json",
             "turn/steer": "v2/TurnSteerResponse.json",
             "turn/interrupt": "v2/TurnInterruptResponse.json",
+            "thread/queue/add": "v2/ThreadQueueAddResponse.json",
+            "thread/queue/list": "v2/ThreadQueueListResponse.json",
         }
         for method, relative in response_files.items():
             path = self.root / relative

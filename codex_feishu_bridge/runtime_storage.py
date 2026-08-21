@@ -17,7 +17,7 @@ def utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-RUNTIME_SCHEMA_VERSION = 17
+RUNTIME_SCHEMA_VERSION = 18
 
 
 class RuntimeStorage(BridgeStorage):
@@ -291,6 +291,7 @@ class RuntimeStorage(BridgeStorage):
                 has_attachments INTEGER NOT NULL DEFAULT 0 CHECK(has_attachments IN (0,1)),
                 turn_id TEXT,
                 user_item_id TEXT,
+                queued_submission_id TEXT,
                 state TEXT NOT NULL CHECK(state IN (
                     'prepared','bytes_sending','accepted','outcome_unknown','completed','rejected'
                 )),
@@ -411,6 +412,7 @@ class RuntimeStorage(BridgeStorage):
             },
             "dispatch_records": {
                 "user_item_id": "TEXT",
+                "queued_submission_id": "TEXT",
                 "submitted_text_hash": "TEXT",
                 "has_attachments": "INTEGER NOT NULL DEFAULT 0 CHECK(has_attachments IN (0,1))",
             },

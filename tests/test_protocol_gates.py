@@ -8,6 +8,7 @@ from codex_feishu_bridge.codex.compatibility import CompatibilityMatrix
 
 ROOT = Path(__file__).parents[1]
 VERSION = ROOT / "generated/codex/0.145.0"
+VERSION_148 = ROOT / "generated/codex/0.148.0"
 
 
 def initialized(protocol: AppServerProtocol) -> None:
@@ -37,6 +38,47 @@ def test_experimental_method_requires_individual_allowlist() -> None:
     initialized(blocked)
     with pytest.raises(ProtocolError, match="individually approved"):
         blocked.build_request("process/spawn", {"command": ["cmd.exe"]})
+
+
+def test_thread_queue_add_requires_and_accepts_individual_allowlist() -> None:
+    matrix = CompatibilityMatrix.load(VERSION_148 / "compatibility-matrix.json")
+    params = {
+        "threadId": "thread",
+        "input": [{"type": "text", "text": "queued"}],
+        "clientUserMessageId": "client-message",
+    }
+    blocked = AppServerProtocol(
+        VERSION_148 / "stable",
+        experimental_schema_root=VERSION_148 / "experimental",
+        experimental_api=True,
+        compatibility_matrix=matrix,
+    )
+    initialized(blocked)
+    with pytest.raises(ProtocolError, match="individually approved"):
+        blocked.build_request("thread/queue/add", params)
+
+    allowed = AppServerProtocol(
+        VERSION_148 / "stable",
+        experimental_schema_root=VERSION_148 / "experimental",
+        experimental_api=True,
+        compatibility_matrix=matrix,
+        approved_experimental_client_methods=frozenset({"thread/queue/add"}),
+    )
+    initialized(allowed)
+    request = allowed.build_request("thread/queue/add", params)
+    assert request["method"] == "thread/queue/add"
+    allowed.observe_incoming(
+        {
+            "id": request["id"],
+            "result": {
+                "queuedSubmission": {
+                    "id": "queued-1",
+                    "input": params["input"],
+                    "clientUserMessageId": "client-message",
+                }
+            },
+        }
+    )
 
 
 def test_unknown_and_duplicate_response_ids_fail_closed() -> None:

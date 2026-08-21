@@ -31,6 +31,7 @@ class DispatchResult:
     dispatch_attempt_id: str
     turn_id: str | None
     state: str
+    queued_submission_id: str | None = None
 
 
 class CodexController:
@@ -164,38 +165,35 @@ class CodexController:
         binding_epoch, identity_epoch, fencing_token = self._require_dispatchable(
             thread_id, required_capability=required_capability
         )
-        thread_result = self.connection.request("thread/resume", {"threadId": thread_id})
+        sandbox = {
+            "readOnly": "read-only",
+            "workspaceWrite": "workspace-write",
+            "dangerFullAccess": "danger-full-access",
+        }[profile.sandbox_type.value]
+        thread_result = self.connection.request(
+            "thread/resume",
+            {
+                "threadId": thread_id,
+                "cwd": str(profile.cwd),
+                "approvalPolicy": profile.approval_policy.value,
+                "approvalsReviewer": profile.approvals_reviewer,
+                "sandbox": sandbox,
+            },
+        )
         thread = thread_result.get("thread")
         if not isinstance(thread, dict):
             raise DispatchError("thread/read result is malformed")
-        status = thread.get("status")
-        if not isinstance(status, dict):
-            raise DispatchError("thread/read status is malformed")
+        if thread.get("canAcceptDirectInput") is not True:
+            raise DispatchError("pinned experimental thread schema does not permit direct input")
         requirements = self._managed_requirements(profile)
         attempt_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"codex-feishu:{ingress_message_id}"))
         client_message_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"codex-feishu:{ingress_message_id}"))
-        if status.get("type") == "idle":
-            if thread.get("canAcceptDirectInput") is not True:
-                raise DispatchError("pinned experimental thread schema does not permit direct input")
-            method = "turn/start"
-            params = profile.turn_start_params(
-                thread_id=thread_id,
-                text=text,
-                client_user_message_id=client_message_id,
-                input_items=input_items,
-            )
-        else:
-            # The rollout-derived value is only a hint.  App Server owns the
-            # live turn state and can safely supersede stale unmatched rollout
-            # task_started records.
-            active_turn_id = self._authoritative_active_turn(thread)
-            method = "turn/steer"
-            params = {
-                "threadId": thread_id,
-                "expectedTurnId": active_turn_id,
-                "input": list(input_items or ({"type": "text", "text": text},)),
-                "clientUserMessageId": client_message_id,
-            }
+        method = "thread/queue/add"
+        params = {
+            "threadId": thread_id,
+            "input": list(input_items or ({"type": "text", "text": text},)),
+            "clientUserMessageId": client_message_id,
+        }
         request_hash = sha256(canonicalize({"method": method, "params": params})).hexdigest()
         now = utc_now()
         with self.storage.immediate() as connection:
@@ -206,7 +204,13 @@ class CodexController:
             if existing is not None:
                 if existing["request_hash"] != request_hash:
                     raise DispatchError("dispatch identity conflicts with a different request")
-                return DispatchResult(attempt_id, existing["turn_id"], existing["state"])
+                queued_id = self.storage.connection.execute(
+                    "SELECT queued_submission_id FROM dispatch_records WHERE dispatch_attempt_id=?",
+                    (attempt_id,),
+                ).fetchone()[0]
+                return DispatchResult(
+                    attempt_id, existing["turn_id"], existing["state"], queued_id
+                )
             connection.execute(
                 "INSERT INTO dispatch_attempts(dispatch_attempt_id,state,updated_at) VALUES(?,'dispatching',?)",
                 (attempt_id, now),
@@ -243,34 +247,53 @@ class CodexController:
                 raise DispatchError("dispatch send fence lost compare-and-swap")
 
         try:
-            result = self.connection.request(
-                method, params, timeout=30, before_send=before_send
+            result = self.connection.request(method, params, timeout=30, before_send=before_send)
+            queued = result.get("queuedSubmission") if isinstance(result, dict) else None
+            queued_id = queued.get("id") if isinstance(queued, dict) else None
+            queued_client_id = (
+                queued.get("clientUserMessageId") if isinstance(queued, dict) else None
             )
+            if not isinstance(queued_id, str) or not queued_id:
+                raise DispatchError("thread/queue/add response lacks a queued submission id")
+            if queued_client_id != client_message_id:
+                raise DispatchError("thread/queue/add response changed the client message id")
         except Exception:
-            self.storage.connection.execute(
+            updated = self.storage.connection.execute(
                 "UPDATE dispatch_records SET state='outcome_unknown',updated_at=? "
                 "WHERE dispatch_attempt_id=? AND state='bytes_sending'",
                 (utc_now(), attempt_id),
             )
+            if updated.rowcount == 0:
+                accepted = self.storage.connection.execute(
+                    "SELECT turn_id,queued_submission_id,state FROM dispatch_records "
+                    "WHERE dispatch_attempt_id=?",
+                    (attempt_id,),
+                ).fetchone()
+                if accepted is not None and accepted["state"] == "accepted":
+                    return DispatchResult(
+                        attempt_id,
+                        accepted["turn_id"],
+                        "accepted",
+                        accepted["queued_submission_id"],
+                    )
             self.storage.connection.execute(
-                "UPDATE dispatch_attempts SET state='outcome_unknown',updated_at=? WHERE dispatch_attempt_id=?",
+                "UPDATE dispatch_attempts SET state='outcome_unknown',updated_at=? "
+                "WHERE dispatch_attempt_id=? AND state='dispatching'",
                 (utc_now(), attempt_id),
             )
+            queued_id = self._queued_submission_with_client_id(
+                thread_id, client_message_id
+            )
+            if queued_id is not None:
+                return self._accept_reconciled_dispatch(
+                    attempt_id, queued_submission_id=queued_id
+                )
             return DispatchResult(attempt_id, None, "outcome_unknown")
-        if method == "turn/start":
-            turn = result.get("turn") if isinstance(result, dict) else None
-            turn_id = turn.get("id") if isinstance(turn, dict) else None
-        else:
-            turn_id = result.get("turnId") if isinstance(result, dict) else None
-        if not isinstance(turn_id, str) or not turn_id:
-            raise DispatchError(f"{method} response lacks a turn id")
-        if active_turn_id is not None and method == "turn/steer" and turn_id != active_turn_id:
-            raise DispatchError("turn/steer response does not match the expected turn")
         with self.storage.immediate() as connection:
             updated = connection.execute(
-                "UPDATE dispatch_records SET state='accepted',turn_id=?,updated_at=? "
-                "WHERE dispatch_attempt_id=? AND state='bytes_sending'",
-                (turn_id, utc_now(), attempt_id),
+                "UPDATE dispatch_records SET state='accepted',queued_submission_id=?,updated_at=? "
+                "WHERE dispatch_attempt_id=? AND state IN ('bytes_sending','accepted')",
+                (queued_id, utc_now(), attempt_id),
             )
             if updated.rowcount != 1:
                 raise DispatchError("dispatch acceptance lost compare-and-swap")
@@ -284,7 +307,88 @@ class CodexController:
                 "dispatch_attempt_id,retain_until) VALUES(?,?,?,?,datetime('now','+365 days'))",
                 (ingress_message_id, request_hash, thread_id, attempt_id),
             )
-        return DispatchResult(attempt_id, turn_id, "accepted")
+        accepted = self.storage.connection.execute(
+            "SELECT turn_id FROM dispatch_records WHERE dispatch_attempt_id=?",
+            (attempt_id,),
+        ).fetchone()
+        return DispatchResult(
+            attempt_id,
+            accepted["turn_id"] if accepted is not None else None,
+            "accepted",
+            queued_id,
+        )
+
+    def _queued_submission_with_client_id(
+        self, thread_id: str, client_user_message_id: str
+    ) -> str | None:
+        """Find one recent durable queue entry after an uncertain add response."""
+
+        cursor: str | None = None
+        matches: list[str] = []
+        for _ in range(10):
+            params: dict[str, Any] = {"threadId": thread_id, "limit": 100}
+            if cursor is not None:
+                params["cursor"] = cursor
+            try:
+                result = self.connection.request("thread/queue/list", params, timeout=10)
+            except Exception:
+                return None
+            data = result.get("data") if isinstance(result, dict) else None
+            if not isinstance(data, list):
+                return None
+            for submission in data:
+                if not isinstance(submission, dict):
+                    continue
+                if submission.get("clientUserMessageId") != client_user_message_id:
+                    continue
+                queued_id = submission.get("id")
+                if isinstance(queued_id, str) and queued_id:
+                    matches.append(queued_id)
+            next_cursor = result.get("nextCursor")
+            if not isinstance(next_cursor, str) or not next_cursor:
+                break
+            cursor = next_cursor
+        return matches[0] if len(set(matches)) == 1 else None
+
+    def _accept_reconciled_dispatch(
+        self,
+        dispatch_attempt_id: str,
+        *,
+        queued_submission_id: str | None = None,
+        turn_id: str | None = None,
+    ) -> DispatchResult:
+        with self.storage.immediate() as connection:
+            record = connection.execute(
+                "SELECT ingress_message_id,thread_id,request_hash FROM dispatch_records "
+                "WHERE dispatch_attempt_id=? AND state='outcome_unknown'",
+                (dispatch_attempt_id,),
+            ).fetchone()
+            if record is None:
+                raise DispatchError("unknown dispatch reconciliation lost compare-and-swap")
+            connection.execute(
+                "UPDATE dispatch_records SET state='accepted',queued_submission_id=COALESCE(?,queued_submission_id),"
+                "turn_id=COALESCE(?,turn_id),updated_at=? WHERE dispatch_attempt_id=?",
+                (queued_submission_id, turn_id, utc_now(), dispatch_attempt_id),
+            )
+            connection.execute(
+                "UPDATE dispatch_attempts SET state='accepted',updated_at=? "
+                "WHERE dispatch_attempt_id=? AND state IN ('dispatching','outcome_unknown')",
+                (utc_now(), dispatch_attempt_id),
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO executed_command_tombstones(tombstone_key,content_hash,"
+                "target_thread_id,dispatch_attempt_id,retain_until) "
+                "VALUES(?,?,?,?,datetime('now','+365 days'))",
+                (
+                    record["ingress_message_id"],
+                    record["request_hash"],
+                    record["thread_id"],
+                    dispatch_attempt_id,
+                ),
+            )
+        return DispatchResult(
+            dispatch_attempt_id, turn_id, "accepted", queued_submission_id
+        )
 
     def reconcile_unknown(self, dispatch_attempt_id: str) -> DispatchResult:
         record = self.storage.connection.execute(
@@ -293,18 +397,20 @@ class CodexController:
         ).fetchone()
         if record is None:
             raise DispatchError("dispatch is not outcome_unknown")
+        queued_id = self._queued_submission_with_client_id(
+            record["thread_id"], record["client_user_message_id"]
+        )
+        if queued_id is not None:
+            return self._accept_reconciled_dispatch(
+                dispatch_attempt_id, queued_submission_id=queued_id
+            )
         history = self.read_thread(record["thread_id"], include_turns=True)
         matches = _find_turns_with_client_id(history, record["client_user_message_id"])
         if len(matches) != 1:
             return DispatchResult(dispatch_attempt_id, None, "outcome_unknown")
-        updated = self.storage.connection.execute(
-            "UPDATE dispatch_records SET state='accepted',turn_id=?,updated_at=? "
-            "WHERE dispatch_attempt_id=? AND state='outcome_unknown'",
-            (matches[0], utc_now(), dispatch_attempt_id),
+        return self._accept_reconciled_dispatch(
+            dispatch_attempt_id, turn_id=matches[0]
         )
-        if updated.rowcount != 1:
-            raise DispatchError("unknown dispatch reconciliation lost compare-and-swap")
-        return DispatchResult(dispatch_attempt_id, matches[0], "accepted")
 
     def append(self, thread_id: str, expected_turn_id: str, text: str, client_id: str) -> str:
         self._require_dispatchable(thread_id, required_capability="controls")

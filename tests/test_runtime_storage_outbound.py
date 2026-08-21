@@ -581,6 +581,57 @@ def test_delayed_desktop_user_item_claims_dispatch_and_is_suppressed_once(
         ).fetchone()[0] == "codex-identical-item"
 
 
+def test_queued_user_item_is_claimed_by_client_identity_and_not_echoed(tmp_path: Path) -> None:
+    with RuntimeStorage(tmp_path / "runtime.db") as storage:
+        storage.initialize_runtime(sink_mode="outbound")
+        _prepare(storage)
+        storage.connection.execute(
+            "INSERT INTO dispatch_attempts(dispatch_attempt_id,state,updated_at) "
+            "VALUES('queue-attempt','dispatching',datetime('now'))"
+        )
+        storage.connection.execute(
+            "INSERT INTO dispatch_records(dispatch_attempt_id,ingress_message_id,thread_id,"
+            "client_user_message_id,profile_hash,binding_epoch,identity_binding_epoch,fencing_token,"
+            "server_epoch,connection_epoch,request_hash,queued_submission_id,state,created_at,updated_at) "
+            "VALUES('queue-attempt','feishu-message','thread','queue-client','profile',1,1,1,"
+            "'server','connection','request-hash','queued-1','accepted',datetime('now'),datetime('now'))"
+        )
+        event = NormalizedEvent(
+            "thread",
+            "turn-from-queue",
+            "user-item-from-queue",
+            EventKind.COMMENTARY,
+            0,
+            "来自飞书",
+            "user_message",
+            client_user_message_id="queue-client",
+        )
+
+        result = OutboundPipeline(storage).ingest_rollout_batch(
+            RolloutBatch(
+                (event,),
+                SourceCursor("source", "file", 100, "queue-hash", "1"),
+            )
+        )
+
+        assert result.inserted_items == 1 and result.queued_messages == 0
+        record = storage.connection.execute(
+            "SELECT state,turn_id,user_item_id,queued_submission_id FROM dispatch_records"
+        ).fetchone()
+        assert tuple(record) == (
+            "accepted",
+            "turn-from-queue",
+            "user-item-from-queue",
+            "queued-1",
+        )
+        assert storage.connection.execute(
+            "SELECT state FROM dispatch_attempts"
+        ).fetchone()[0] == "accepted"
+        assert storage.connection.execute(
+            "SELECT COUNT(*) FROM executed_command_tombstones"
+        ).fetchone()[0] == 1
+
+
 def test_runtime_outbox_completion_is_compare_and_swap(tmp_path: Path) -> None:
     with RuntimeStorage(tmp_path / "runtime.db") as storage:
         storage.initialize_runtime(sink_mode="outbound")
@@ -1014,7 +1065,7 @@ def test_runtime_v2_database_is_upgraded_without_rebinding(tmp_path: Path) -> No
         assert (row["active_chat_id"], row["conversation_mode"]) == ("legacy-chat", "p2p")
         assert storage.connection.execute(
             "SELECT value FROM runtime_metadata WHERE key='runtime_schema_version'"
-        ).fetchone()[0] == "17"
+        ).fetchone()[0] == "18"
         columns = {
             row[1]
             for row in storage.connection.execute("PRAGMA table_info(task_bindings)").fetchall()
@@ -1035,7 +1086,7 @@ def test_runtime_v2_database_is_upgraded_without_rebinding(tmp_path: Path) -> No
                 "PRAGMA table_info(dispatch_records)"
             ).fetchall()
         }
-        assert "user_item_id" in dispatch_columns
+        assert {"user_item_id", "queued_submission_id"} <= dispatch_columns
 
 
 def test_schema_migration_repairs_stuck_permanent_title_projection(tmp_path: Path) -> None:

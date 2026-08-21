@@ -75,6 +75,7 @@ class NormalizedEvent:
     text: str
     source_type: str
     images: tuple[EmbeddedImage, ...] = ()
+    client_user_message_id: str | None = None
 
     @property
     def logical_key(self) -> str:

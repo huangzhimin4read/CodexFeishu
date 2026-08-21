@@ -63,3 +63,21 @@ def test_discovery_still_fails_closed_for_invalid_metadata(tmp_path: Path) -> No
             project_allowlist=(project,),
             thread_allowlist=frozenset({"thread-1"}),
         )
+
+
+@pytest.mark.parametrize("content", [b"", b'{"type":"session_'])
+def test_discovery_skips_rollout_while_first_record_is_incomplete(
+    tmp_path: Path, content: bytes
+) -> None:
+    home = tmp_path / "codex-home"
+    project = tmp_path / "project"
+    project.mkdir()
+    path = home / "sessions" / "new.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(content)
+
+    assert discover_rollouts(
+        home,
+        project_allowlist=(project,),
+        thread_allowlist=frozenset({"thread-1"}),
+    ) == ()
